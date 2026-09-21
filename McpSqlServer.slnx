@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/McpSqlServer/McpSqlServer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/McpSqlServer.Tests/McpSqlServer.Tests.csproj" />
+  </Folder>
+</Solution>

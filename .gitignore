@@ -1,0 +1,35 @@
+# Build and compilation outputs
+bin/
+obj/
+publish/
+out/
+
+# Visual Studio & IDE files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Credentials, secrets, environment files
+.env
+*.env.*
+*.env
+dbconfig.json
+connectionStrings.json
+appsettings.Development.json
+*.credentials
+credentials.json
+secrets/
+
+# Logs and runtime traces
+*.log
+logs/
+process.log
+
+# Operating system artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
