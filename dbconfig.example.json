@@ -1,0 +1,11 @@
+{
+  "Server": "",
+  "Username": "",
+  "Password": "",
+  "Database": "master",
+  "Port": 1433,
+  "Encrypt": true,
+  "TrustServerCertificate": false,
+  "ConnectTimeout": 10,
+  "QueryTimeout": 15
+}
