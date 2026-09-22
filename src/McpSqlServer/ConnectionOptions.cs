@@ -4,6 +4,7 @@ namespace McpSqlServer;
 
 public class ConnectionOptions
 {
+    public string ServerAlias { get; set; } = "DEV";
     public string Server { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
@@ -20,32 +21,32 @@ public class ConnectionOptions
 
         if (string.IsNullOrWhiteSpace(Server))
         {
-            errors.Add("Server name không được để trống.");
+            errors.Add("Server name cannot be empty.");
         }
 
         if (string.IsNullOrWhiteSpace(Username))
         {
-            errors.Add("Username không được để trống.");
+            errors.Add("Username cannot be empty.");
         }
 
         if (string.IsNullOrEmpty(Password))
         {
-            errors.Add("Password không được để trống.");
+            errors.Add("Password cannot be empty.");
         }
 
         if (Port.HasValue && (Port.Value < 1 || Port.Value > 65535))
         {
-            errors.Add("Port phải nằm trong khoảng từ 1 đến 65535.");
+            errors.Add("Port must be between 1 and 65535.");
         }
 
         if (ConnectTimeout < 1 || ConnectTimeout > 120)
         {
-            errors.Add("Connect timeout phải nằm trong khoảng từ 1 đến 120 giây.");
+            errors.Add("Connect timeout must be between 1 and 120 seconds.");
         }
 
         if (QueryTimeout < 1 || QueryTimeout > 120)
         {
-            errors.Add("Query timeout phải nằm trong khoảng từ 1 đến 120 giây.");
+            errors.Add("Query timeout must be between 1 and 120 seconds.");
         }
 
         return errors;
@@ -56,12 +57,11 @@ public class ConnectionOptions
         var errors = Validate();
         if (errors.Count > 0)
         {
-            throw new InvalidOperationException($"Cấu hình không hợp lệ: {string.Join(", ", errors)}");
+            throw new InvalidOperationException($"Invalid configuration: {string.Join(", ", errors)}");
         }
 
         var builder = new SqlConnectionStringBuilder();
 
-        // Server format: if port is explicitly specified and not already in Server string
         var dataSource = Server.Trim();
         if (Port.HasValue && !dataSource.Contains(',') && !dataSource.Contains('\\'))
         {
@@ -84,6 +84,7 @@ public class ConnectionOptions
     {
         var options = new ConnectionOptions
         {
+            ServerAlias = Environment.GetEnvironmentVariable("MSSQL_SERVER_ALIAS") ?? "DEV",
             Server = Environment.GetEnvironmentVariable("MSSQL_SERVER") ?? string.Empty,
             Username = Environment.GetEnvironmentVariable("MSSQL_USERNAME") ?? string.Empty,
             Password = Environment.GetEnvironmentVariable("MSSQL_PASSWORD") ?? string.Empty,
@@ -142,7 +143,7 @@ public class ConnectionOptions
         }
         catch (Exception ex)
         {
-            Logger.Warn($"Không thể đọc file config '{relativePath}': {ex.Message}");
+            Logger.Warn($"Unable to read configuration file '{relativePath}': {ex.Message}");
             return (false, null);
         }
     }
@@ -152,7 +153,7 @@ public class ConnectionOptions
         var (loaded, fileOptions) = TryLoadFromFile(relativePath);
         if (loaded && fileOptions != null)
         {
-            Logger.Info($"Đã nạp cấu hình database từ '{relativePath}'.");
+            Logger.Info($"Loaded database configuration from '{relativePath}'.");
             return fileOptions;
         }
 
@@ -161,8 +162,9 @@ public class ConnectionOptions
 
     public string GetDisplaySummary()
     {
-        var trust = TrustServerCertificate ? "Bật (Trust)" : "Tắt (Verify CA)";
+        var alias = string.IsNullOrWhiteSpace(ServerAlias) ? "DEV" : ServerAlias;
+        var trust = TrustServerCertificate ? "Enabled (Trust)" : "Disabled (Verify CA)";
         var db = string.IsNullOrWhiteSpace(Database) ? "master" : Database;
-        return $"Server: {Server} | User: {Username} | Initial DB: {db} | Port: {Port?.ToString() ?? "mặc định"} | TrustCert: {trust}";
+        return $"Alias: {alias} | Server: {Server} | User: {Username} | Initial DB: {db} | Port: {Port?.ToString() ?? "default"} | TrustCert: {trust}";
     }
 }

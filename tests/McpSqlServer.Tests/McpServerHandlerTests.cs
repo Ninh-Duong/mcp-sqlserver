@@ -47,7 +47,7 @@ public class McpServerHandlerTests
         Assert.Equal(2, root.GetProperty("id").GetInt64());
         var tools = root.GetProperty("result").GetProperty("tools");
 
-        Assert.Equal(3, tools.GetArrayLength());
+        Assert.Equal(5, tools.GetArrayLength());
 
         var toolNames = new List<string>();
         foreach (var tool in tools.EnumerateArray())
@@ -58,6 +58,35 @@ public class McpServerHandlerTests
         Assert.Contains("test_connection", toolNames);
         Assert.Contains("list_databases", toolNames);
         Assert.Contains("list_tables", toolNames);
+        Assert.Contains("scan_server_context", toolNames);
+        Assert.Contains("execute_query", toolNames);
+    }
+
+    [Fact]
+    public async Task HandleMessageAsync_ExecuteQuery_WithForbiddenKeyword_ReturnsError()
+    {
+        var handler = new McpServerHandler(_dummyOptions);
+        var request = """
+        {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "execute_query",
+                "arguments": {
+                    "query": "DROP TABLE Users;"
+                }
+            }
+        }
+        """;
+
+        var response = await handler.HandleMessageAsync(request);
+        Assert.NotNull(response);
+
+        using var doc = JsonDocument.Parse(response);
+        var root = doc.RootElement;
+        var result = root.GetProperty("result");
+        Assert.True(result.GetProperty("isError").GetBoolean());
     }
 
     [Fact]
@@ -118,5 +147,37 @@ public class McpServerHandlerTests
         Assert.Equal(50, root.GetProperty("id").GetInt64());
         var result = root.GetProperty("result");
         Assert.True(result.GetProperty("isError").GetBoolean());
+    }
+
+    [Fact]
+    public async Task HandleMessageAsync_ToolsCall_MissingParams_ReturnsInvalidParamsError()
+    {
+        var handler = new McpServerHandler(_dummyOptions);
+        var request = """{"jsonrpc": "2.0", "id": 51, "method": "tools/call"}""";
+
+        var response = await handler.HandleMessageAsync(request);
+
+        Assert.NotNull(response);
+        using var doc = JsonDocument.Parse(response);
+        var root = doc.RootElement;
+
+        Assert.True(root.TryGetProperty("error", out var errorProp));
+        Assert.Equal(-32602, errorProp.GetProperty("code").GetInt32());
+    }
+
+    [Fact]
+    public async Task HandleMessageAsync_ExecuteQuery_MissingQuery_ReturnsInvalidParamsError()
+    {
+        var handler = new McpServerHandler(_dummyOptions);
+        var request = """{"jsonrpc": "2.0", "id": 52, "method": "tools/call", "params": {"name": "execute_query", "arguments": {}}}""";
+
+        var response = await handler.HandleMessageAsync(request);
+
+        Assert.NotNull(response);
+        using var doc = JsonDocument.Parse(response);
+        var root = doc.RootElement;
+
+        Assert.True(root.TryGetProperty("error", out var errorProp));
+        Assert.Equal(-32602, errorProp.GetProperty("code").GetInt32());
     }
 }

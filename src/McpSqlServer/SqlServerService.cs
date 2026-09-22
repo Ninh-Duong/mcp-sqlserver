@@ -57,7 +57,7 @@ ORDER BY name;";
     public async Task<ConnectionCheckResult> TestConnectionAsync(ConnectionOptions options, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        Logger.Process("CONNECT", $"Đang thử kết nối tới {options.Server} (User: {options.Username})...");
+        Logger.Process("CONNECT", $"Attempting connection to {options.Server} (User: {options.Username})...");
 
         try
         {
@@ -73,7 +73,7 @@ ORDER BY name;";
             var versionStr = versionObj?.ToString()?.Split('\n')[0].Trim();
 
             stopwatch.Stop();
-            Logger.Process("CONNECT", $"Kết nối thành công trong {stopwatch.ElapsedMilliseconds} ms ({versionStr}).");
+            Logger.Process("CONNECT", $"Connected successfully in {stopwatch.ElapsedMilliseconds} ms ({versionStr}).");
 
             return new ConnectionCheckResult(
                 Success: true,
@@ -85,7 +85,7 @@ ORDER BY name;";
         {
             stopwatch.Stop();
             var friendlyError = FormatSqlException(ex, options);
-            Logger.Error($"Lỗi kết nối SQL Server (Mã lỗi {ex.Number})", ex);
+            Logger.Error($"SQL Server connection error (Error code {ex.Number})", ex);
 
             return new ConnectionCheckResult(
                 Success: false,
@@ -96,19 +96,19 @@ ORDER BY name;";
         catch (Exception ex)
         {
             stopwatch.Stop();
-            Logger.Error("Lỗi kết nối không xác định", ex);
+            Logger.Error("Unknown connection error", ex);
 
             return new ConnectionCheckResult(
                 Success: false,
                 ElapsedMs: stopwatch.ElapsedMilliseconds,
-                ErrorMessage: $"Lỗi kết nối: {Logger.Sanitize(ex.Message)}"
+                ErrorMessage: $"Connection error: {Logger.Sanitize(ex.Message)}"
             );
         }
     }
 
     public async Task<DatabaseListingResult> ListDatabasesAsync(ConnectionOptions options, CancellationToken cancellationToken = default)
     {
-        Logger.Process("QUERY", "Đang truy vấn danh mục sys.databases...");
+        Logger.Process("QUERY", "Querying catalog sys.databases...");
 
         try
         {
@@ -144,7 +144,7 @@ ORDER BY name;";
             var systemCount = list.Count(d => d.IsSystem);
             var otherCount = list.Count(d => !d.IsSystem);
 
-            Logger.Process("QUERY", $"Truy vấn hoàn tất: {list.Count} database (Hệ thống: {systemCount}, Khác: {otherCount}).");
+            Logger.Process("QUERY", $"Query completed: {list.Count} databases (System: {systemCount}, Other: {otherCount}).");
 
             return new DatabaseListingResult(
                 Success: true,
@@ -157,7 +157,7 @@ ORDER BY name;";
         catch (SqlException ex)
         {
             var friendlyError = FormatSqlException(ex, options);
-            Logger.Error($"Lỗi khi truy vấn catalog sys.databases (Mã {ex.Number})", ex);
+            Logger.Error($"Error querying catalog sys.databases (Code {ex.Number})", ex);
 
             return new DatabaseListingResult(
                 Success: false,
@@ -170,7 +170,7 @@ ORDER BY name;";
         }
         catch (Exception ex)
         {
-            Logger.Error("Lỗi hệ thống khi liệt kê database", ex);
+            Logger.Error("System error while listing databases", ex);
 
             return new DatabaseListingResult(
                 Success: false,
@@ -178,7 +178,7 @@ ORDER BY name;";
                 SystemCount: 0,
                 OtherCount: 0,
                 Databases: Array.Empty<DatabaseItem>(),
-                ErrorMessage: $"Lỗi: {Logger.Sanitize(ex.Message)}"
+                ErrorMessage: $"Error: {Logger.Sanitize(ex.Message)}"
             );
         }
     }
@@ -187,16 +187,18 @@ ORDER BY name;";
     {
         if (string.IsNullOrWhiteSpace(databaseName))
         {
-            return new TableListingResult(false, string.Empty, 0, Array.Empty<TableItem>(), "Tên database không được để trống.");
+            Logger.Error("Database name cannot be empty for ListTablesAsync.");
+            return new TableListingResult(false, string.Empty, 0, Array.Empty<TableItem>(), "Database name cannot be empty.");
         }
 
         var dbName = databaseName.Trim();
-        Logger.Process("QUERY", $"Đang truy vấn danh sách table trong database '{dbName}'...");
+        Logger.Process("QUERY", $"Querying table list in database '{dbName}'...");
 
         try
         {
             var targetOptions = new ConnectionOptions
             {
+                ServerAlias = options.ServerAlias,
                 Server = options.Server,
                 Username = options.Username,
                 Password = options.Password,
@@ -231,7 +233,7 @@ ORDER BY s.name, t.name;";
                 tables.Add(new TableItem(schema, tableName));
             }
 
-            Logger.Process("QUERY", $"Tìm thấy {tables.Count} table trong database '{dbName}'.");
+            Logger.Process("QUERY", $"Found {tables.Count} tables in database '{dbName}'.");
 
             return new TableListingResult(
                 Success: true,
@@ -243,7 +245,7 @@ ORDER BY s.name, t.name;";
         catch (SqlException ex)
         {
             var friendlyError = FormatSqlException(ex, options);
-            Logger.Error($"Lỗi khi truy vấn table trong database '{dbName}' (Mã {ex.Number})", ex);
+            Logger.Error($"Error querying tables in database '{dbName}' (Code {ex.Number})", ex);
 
             return new TableListingResult(
                 Success: false,
@@ -255,14 +257,488 @@ ORDER BY s.name, t.name;";
         }
         catch (Exception ex)
         {
-            Logger.Error($"Lỗi hệ thống khi lấy danh sách table trong database '{dbName}'", ex);
+            Logger.Error($"System error getting table list in database '{dbName}'", ex);
 
             return new TableListingResult(
                 Success: false,
                 Database: dbName,
                 TableCount: 0,
                 Tables: Array.Empty<TableItem>(),
-                ErrorMessage: $"Lỗi: {Logger.Sanitize(ex.Message)}"
+                ErrorMessage: $"Error: {Logger.Sanitize(ex.Message)}"
+            );
+        }
+    }
+
+    public static string FormatDataType(string typeName, short maxLength, byte precision, byte scale)
+    {
+        var lower = typeName.ToLowerInvariant();
+        return lower switch
+        {
+            "nvarchar" or "nchar" => maxLength == -1 ? $"{lower}(max)" : $"{lower}({maxLength / 2})",
+            "varchar" or "char" or "varbinary" or "binary" => maxLength == -1 ? $"{lower}(max)" : $"{lower}({maxLength})",
+            "decimal" or "numeric" => $"{lower}({precision},{scale})",
+            "time" or "datetime2" or "datetimeoffset" => scale == 7 ? lower : $"{lower}({scale})",
+            _ => lower
+        };
+    }
+
+    public async Task<DatabaseScanReport> ScanDatabaseSchemaAsync(ConnectionOptions options, string databaseName, CancellationToken cancellationToken = default)
+    {
+        var dbName = databaseName.Trim();
+        Logger.Process("SCAN", $"Scanning schema for database '{dbName}'...");
+
+        var targetOptions = new ConnectionOptions
+        {
+            ServerAlias = options.ServerAlias,
+            Server = options.Server,
+            Username = options.Username,
+            Password = options.Password,
+            Port = options.Port,
+            Database = dbName,
+            Encrypt = options.Encrypt,
+            TrustServerCertificate = options.TrustServerCertificate,
+            ConnectTimeout = options.ConnectTimeout,
+            QueryTimeout = options.QueryTimeout
+        };
+
+        try
+        {
+            var connectionString = targetOptions.BuildConnectionString();
+            await using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            // 1. Scan Tables & Columns (including Data Types, PK, FK, Nullable, Identity, Description)
+            var tableDict = new Dictionary<string, (string Schema, string Name, List<ColumnSchemaItem> Columns)>();
+            const string queryTablesAndColumns = @"
+SELECT
+    s.name AS schema_name,
+    t.name AS table_name,
+    c.name AS column_name,
+    ty.name AS type_name,
+    c.max_length,
+    c.precision,
+    c.scale,
+    c.is_nullable,
+    c.is_identity,
+    ISNULL(pk.is_primary_key, 0) AS is_pk,
+    fk.referenced_target,
+    CAST(ep.value AS NVARCHAR(MAX)) AS column_description
+FROM sys.tables t
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+INNER JOIN sys.columns c ON t.object_id = c.object_id
+INNER JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+LEFT JOIN (
+    SELECT ic.object_id, ic.column_id, 1 AS is_primary_key
+    FROM sys.index_columns ic
+    INNER JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+    WHERE i.is_primary_key = 1
+) pk ON t.object_id = pk.object_id AND c.column_id = pk.column_id
+LEFT JOIN (
+    SELECT 
+        fkc.parent_object_id,
+        fkc.parent_column_id,
+        CONCAT(QUOTENAME(ref_s.name), '.', QUOTENAME(ref_t.name), '.', QUOTENAME(ref_c.name)) AS referenced_target
+    FROM sys.foreign_key_columns fkc
+    INNER JOIN sys.tables ref_t ON fkc.referenced_object_id = ref_t.object_id
+    INNER JOIN sys.schemas ref_s ON ref_t.schema_id = ref_s.schema_id
+    INNER JOIN sys.columns ref_c ON fkc.referenced_object_id = ref_c.object_id AND fkc.referenced_column_id = ref_c.column_id
+) fk ON t.object_id = fk.parent_object_id AND c.column_id = fk.parent_column_id
+LEFT JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND c.column_id = ep.minor_id AND ep.name = 'MS_Description'
+ORDER BY s.name, t.name, c.column_id;";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryTablesAndColumns;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var table = reader.GetString(1);
+                    var column = reader.GetString(2);
+                    var typeName = reader.GetString(3);
+                    var maxLen = reader.GetInt16(4);
+                    var precision = reader.GetByte(5);
+                    var scale = reader.GetByte(6);
+                    var isNullable = reader.GetBoolean(7);
+                    var isIdentity = reader.GetBoolean(8);
+                    var isPk = reader.GetInt32(9) == 1;
+                    var fkRef = reader.IsDBNull(10) ? null : reader.GetString(10);
+                    var colDesc = reader.IsDBNull(11) ? null : reader.GetString(11);
+
+                    var formattedType = FormatDataType(typeName, maxLen, precision, scale);
+                    var colItem = new ColumnSchemaItem(column, formattedType, isNullable, isPk, isIdentity, fkRef, colDesc);
+
+                    var tableKey = $"{schema}.{table}";
+                    if (!tableDict.TryGetValue(tableKey, out var val))
+                    {
+                        val = (schema, table, new List<ColumnSchemaItem>());
+                        tableDict[tableKey] = val;
+                    }
+                    val.Columns.Add(colItem);
+                }
+            }
+
+            var tables = tableDict.Values
+                .Select(t => new TableSchemaItem(t.Schema, t.Name, t.Columns))
+                .ToList();
+
+            // 2. Scan Views & SQL Logic
+            var views = new List<ViewSchemaItem>();
+            const string queryViews = @"
+SELECT 
+    s.name AS schema_name,
+    v.name AS view_name,
+    m.definition AS view_definition
+FROM sys.views v
+INNER JOIN sys.schemas s ON v.schema_id = s.schema_id
+LEFT JOIN sys.sql_modules m ON v.object_id = m.object_id
+ORDER BY s.name, v.name;
+";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryViews;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var viewName = reader.GetString(1);
+                    var def = reader.IsDBNull(2) ? "-- [Definition hidden or restricted by permissions]" : reader.GetString(2);
+                    views.Add(new ViewSchemaItem(schema, viewName, def));
+                }
+            }
+
+            // 3. Scan Stored Procedures & Parameters & SQL Logic
+            var procMap = new Dictionary<int, (string Schema, string Name, string? Def, List<string> Params)>();
+            const string queryProcs = @"
+SELECT 
+    s.name AS schema_name,
+    p.name AS proc_name,
+    m.definition AS proc_definition,
+    p.object_id
+FROM sys.procedures p
+INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
+LEFT JOIN sys.sql_modules m ON p.object_id = m.object_id
+WHERE p.is_ms_shipped = 0
+ORDER BY s.name, p.name;
+";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryProcs;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var procName = reader.GetString(1);
+                    var def = reader.IsDBNull(2) ? "-- [Definition hidden or restricted by permissions]" : reader.GetString(2);
+                    var objId = reader.GetInt32(3);
+                    procMap[objId] = (schema, procName, def, new List<string>());
+                }
+            }
+
+            // Scan Parameters of Stored Procedures
+            if (procMap.Count > 0)
+            {
+                const string queryParams = @"
+SELECT 
+    p.object_id,
+    pm.name AS param_name,
+    ty.name AS type_name,
+    pm.max_length,
+    pm.precision,
+    pm.scale,
+    pm.is_output
+FROM sys.parameters pm
+INNER JOIN sys.types ty ON pm.user_type_id = ty.user_type_id
+INNER JOIN sys.procedures p ON pm.object_id = p.object_id
+WHERE p.is_ms_shipped = 0
+ORDER BY p.object_id, pm.parameter_id;
+";
+
+                await using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = queryParams;
+                    cmd.CommandTimeout = options.QueryTimeout;
+                    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var objId = reader.GetInt32(0);
+                        if (procMap.TryGetValue(objId, out var entry))
+                        {
+                            var paramName = reader.IsDBNull(1) ? "@return_value" : reader.GetString(1);
+                            var typeName = reader.GetString(2);
+                            var maxLen = reader.GetInt16(3);
+                            var precision = reader.GetByte(4);
+                            var scale = reader.GetByte(5);
+                            var isOutput = reader.GetBoolean(6);
+
+                            var formattedType = FormatDataType(typeName, maxLen, precision, scale);
+                            var paramStr = $"{paramName} {formattedType}{(isOutput ? " OUTPUT" : "")}";
+                            entry.Params.Add(paramStr);
+                        }
+                    }
+                }
+            }
+
+            var procs = procMap.Values
+                .Select(p => new ProcedureSchemaItem(p.Schema, p.Name, p.Params, p.Def))
+                .ToList();
+
+            Logger.Process("SCAN", $"Database '{dbName}' completed: {tables.Count} tables, {views.Count} views, {procs.Count} procedures.");
+
+            return new DatabaseScanReport(
+                DatabaseName: dbName,
+                Success: true,
+                TableCount: tables.Count,
+                ViewCount: views.Count,
+                ProcedureCount: procs.Count,
+                Tables: tables,
+                Views: views,
+                Procedures: procs
+            );
+        }
+        catch (SqlException ex)
+        {
+            var friendlyError = FormatSqlException(ex, targetOptions);
+            Logger.Error($"Error scanning database '{dbName}' (Code {ex.Number})", ex);
+            return new DatabaseScanReport(dbName, false, 0, 0, 0, [], [], [], friendlyError);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"System error scanning database '{dbName}'", ex);
+            return new DatabaseScanReport(dbName, false, 0, 0, 0, [], [], [], Logger.Sanitize(ex.Message));
+        }
+    }
+
+    public async Task<ServerScanResult> ScanServerAsync(
+        ConnectionOptions options,
+        bool includeSystem = false,
+        Action<string>? onProgress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var sw = Stopwatch.StartNew();
+        var alias = string.IsNullOrWhiteSpace(options.ServerAlias) ? "DEV" : options.ServerAlias.Trim();
+
+        onProgress?.Invoke($"Connecting to Server [{alias}] ({options.Server})...");
+        var testResult = await TestConnectionAsync(options, cancellationToken);
+        if (!testResult.Success)
+        {
+            throw new InvalidOperationException($"Unable to connect to server: {testResult.ErrorMessage}");
+        }
+
+        var serverVersion = testResult.ServerVersion ?? "Microsoft SQL Server (Unspecified version)";
+
+        onProgress?.Invoke("Fetching database catalog...");
+        var dbListResult = await ListDatabasesAsync(options, cancellationToken);
+        if (!dbListResult.Success)
+        {
+            throw new InvalidOperationException($"Unable to fetch database list: {dbListResult.ErrorMessage}");
+        }
+
+        var candidateDbs = dbListResult.Databases
+            .Where(d => includeSystem || !d.IsSystem)
+            .Where(d => d.State.Equals("ONLINE", StringComparison.OrdinalIgnoreCase))
+            .Where(d => d.HasAccess != false)
+            .ToList();
+
+        onProgress?.Invoke($"Found {candidateDbs.Count} databases ready to scan (Include system: {includeSystem}).");
+
+        var reports = new List<DatabaseScanReport>();
+        for (int i = 0; i < candidateDbs.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var db = candidateDbs[i];
+            onProgress?.Invoke($"[{i + 1}/{candidateDbs.Count}] Scanning database '{db.Name}'...");
+
+            var report = await ScanDatabaseSchemaAsync(options, db.Name, cancellationToken);
+            reports.Add(report);
+        }
+
+        sw.Stop();
+        return new ServerScanResult(
+            ServerAlias: alias,
+            ServerHost: options.Server,
+            ServerVersion: serverVersion,
+            ScannedAt: DateTime.Now,
+            ElapsedMs: sw.ElapsedMilliseconds,
+            Databases: reports
+        );
+    }
+
+    public static (bool IsValid, string? ErrorMessage) ValidateReadOnlyQuery(string sql)
+    {
+        if (string.IsNullOrWhiteSpace(sql))
+        {
+            return (false, "SQL query cannot be empty.");
+        }
+
+        var trimmed = sql.Trim();
+
+        // 1. Remove block and line comments before inspection
+        var cleanSql = System.Text.RegularExpressions.Regex.Replace(trimmed, @"/\*.*?\*/", " ", System.Text.RegularExpressions.RegexOptions.Singleline);
+        cleanSql = System.Text.RegularExpressions.Regex.Replace(cleanSql, @"--.*$", " ", System.Text.RegularExpressions.RegexOptions.Multiline).Trim();
+
+        if (string.IsNullOrWhiteSpace(cleanSql))
+        {
+            return (false, "SQL query does not contain valid executable syntax.");
+        }
+
+        // 2. Must begin with SELECT or WITH (CTE)
+        if (!System.Text.RegularExpressions.Regex.IsMatch(cleanSql, @"^(?i)(SELECT|WITH)\b"))
+        {
+            return (false, "Only read-only queries (SELECT or WITH ... SELECT) are allowed. Modifying operations are prohibited.");
+        }
+
+        // 3. Remove string literals '...' to prevent false positives on string values (e.g. WHERE Status = 'DELETED')
+        var withoutStrings = System.Text.RegularExpressions.Regex.Replace(cleanSql, @"'([^']|'')*'", "''");
+
+        // 4. Block modifying or administrative keywords
+        var forbiddenPattern = @"\b(?i)(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|MERGE|GRANT|REVOKE|DENY|EXEC|EXECUTE|SHUTDOWN)\b";
+        if (System.Text.RegularExpressions.Regex.IsMatch(withoutStrings, forbiddenPattern))
+        {
+            return (false, "Forbidden modifying or administrative keyword detected in query. Only pure SELECT queries are permitted.");
+        }
+
+        return (true, null);
+    }
+
+    public async Task<QueryExecutionResult> ExecuteQueryAsync(
+        ConnectionOptions options,
+        string sql,
+        string? database = null,
+        int maxRows = 100,
+        CancellationToken cancellationToken = default)
+    {
+        var validation = ValidateReadOnlyQuery(sql);
+        var targetDb = string.IsNullOrWhiteSpace(database) ? options.Database : database.Trim();
+
+        if (!validation.IsValid)
+        {
+            Logger.Error($"Query validation failed on database '{targetDb}': {validation.ErrorMessage} (SQL: {Logger.Sanitize(sql)})");
+            return new QueryExecutionResult(
+                Success: false,
+                Database: targetDb,
+                RowCount: 0,
+                IsTruncated: false,
+                ElapsedMs: 0,
+                Columns: Array.Empty<string>(),
+                Rows: Array.Empty<IReadOnlyDictionary<string, object?>>(),
+                ErrorMessage: validation.ErrorMessage
+            );
+        }
+
+        var targetOptions = new ConnectionOptions
+        {
+            ServerAlias = options.ServerAlias,
+            Server = options.Server,
+            Username = options.Username,
+            Password = options.Password,
+            Port = options.Port,
+            Database = targetDb,
+            Encrypt = options.Encrypt,
+            TrustServerCertificate = options.TrustServerCertificate,
+            ConnectTimeout = options.ConnectTimeout,
+            QueryTimeout = options.QueryTimeout
+        };
+
+        var sw = Stopwatch.StartNew();
+        int safeMaxRows = Math.Clamp(maxRows, 1, 1000);
+
+        try
+        {
+            var connStr = targetOptions.BuildConnectionString();
+            await using var connection = new SqlConnection(connStr);
+            await connection.OpenAsync(cancellationToken);
+
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.CommandTimeout = options.QueryTimeout;
+
+            var rows = new List<Dictionary<string, object?>>();
+            var columns = new List<string>();
+            bool isTruncated = false;
+
+            await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.CloseConnection, cancellationToken);
+
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                columns.Add(reader.GetName(i));
+            }
+
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (rows.Count >= safeMaxRows)
+                {
+                    isTruncated = true;
+                    break;
+                }
+
+                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    var colName = columns[i];
+                    var val = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    if (val is byte[] bytes)
+                    {
+                        val = "0x" + Convert.ToHexString(bytes);
+                    }
+                    else if (val is DateTime dt)
+                    {
+                        val = dt.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                    }
+                    else if (val is DateTimeOffset dto)
+                    {
+                        val = dto.ToString("yyyy-MM-dd HH:mm:ss.fff zzz");
+                    }
+                    row[colName] = val;
+                }
+                rows.Add(row);
+            }
+
+            sw.Stop();
+            return new QueryExecutionResult(
+                Success: true,
+                Database: targetDb,
+                RowCount: rows.Count,
+                IsTruncated: isTruncated,
+                ElapsedMs: sw.ElapsedMilliseconds,
+                Columns: columns,
+                Rows: rows
+            );
+        }
+        catch (SqlException ex)
+        {
+            sw.Stop();
+            var friendlyError = FormatSqlException(ex, targetOptions);
+            Logger.Error($"SQL execution error on database '{targetDb}' (Code {ex.Number}): {friendlyError}", ex);
+            return new QueryExecutionResult(
+                Success: false,
+                Database: targetDb,
+                RowCount: 0,
+                IsTruncated: false,
+                ElapsedMs: sw.ElapsedMilliseconds,
+                Columns: Array.Empty<string>(),
+                Rows: Array.Empty<IReadOnlyDictionary<string, object?>>(),
+                ErrorMessage: friendlyError
+            );
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            Logger.Error($"Unexpected execution error on database '{targetDb}': {ex.Message}", ex);
+            return new QueryExecutionResult(
+                Success: false,
+                Database: targetDb,
+                RowCount: 0,
+                IsTruncated: false,
+                ElapsedMs: sw.ElapsedMilliseconds,
+                Columns: Array.Empty<string>(),
+                Rows: Array.Empty<IReadOnlyDictionary<string, object?>>(),
+                ErrorMessage: $"Execution error: {Logger.Sanitize(ex.Message)}"
             );
         }
     }
@@ -271,12 +747,12 @@ ORDER BY s.name, t.name;";
     {
         return ex.Number switch
         {
-            18456 => "Đăng nhập thất bại. Vui lòng kiểm tra lại Username và Password.",
-            53 => $"Không thể kết nối đến server '{options.Server}'. Vui lòng kiểm tra địa chỉ server, port hoặc cấu hình tường lửa.",
-            4060 => $"Không thể mở initial database '{options.Database}'. Tài khoản có thể chưa được cấp quyền truy cập database này.",
-            -2 => "Hết thời gian chờ kết nối (Connection Timeout). Server không phản hồi kịp thời.",
-            -2146893019 => "Lỗi chứng chỉ TLS/SSL: Chứng chỉ server không được tin cậy. Hãy bật 'Trust Server Certificate' nếu dùng Self-signed cert.",
-            _ => $"Lỗi SQL Server ({ex.Number}): {Logger.Sanitize(ex.Message)}"
+            18456 => "Login failed. Please verify your Username and Password.",
+            53 => $"Cannot connect to server '{options.Server}'. Please verify the server address, port, and firewall rules.",
+            4060 => $"Cannot open initial database '{options.Database}'. The login may not have access permissions.",
+            -2 => "Connection timed out. The server did not respond in time.",
+            -2146893019 => "TLS/SSL certificate error: Server certificate is untrusted. Enable 'Trust Server Certificate' if using self-signed certificates.",
+            _ => $"SQL Server error ({ex.Number}): {Logger.Sanitize(ex.Message)}"
         };
     }
 }

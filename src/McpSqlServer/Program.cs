@@ -6,11 +6,11 @@ public class Program
     {
         Logger.Initialize(enableFileLogging: true);
 
-        // 1. Kiểm tra môi trường, packages & dependencies trước khi chạy (Preflight Check)
+        // 1. Environment, packages & dependency checks (Preflight Check)
         var preflight = PreflightChecker.RunPreflightChecks();
         if (!preflight.Success)
         {
-            Console.Error.WriteLine("[FATAL] Preflight Dependency Check Thất Bại:");
+            Console.Error.WriteLine("[FATAL] Preflight Dependency Check Failed:");
             foreach (var err in preflight.Errors)
             {
                 Console.Error.WriteLine($" - {err}");
@@ -18,11 +18,11 @@ public class Program
             return 1;
         }
 
-        // 2. Chạy In-Process Core Self-Tests (Run Gate bắt buộc mọi lần run)
+        // 2. Run In-Process Core Self-Tests (Run Gate mandatory for every run)
         var selfTests = PreflightChecker.RunCoreSelfTests();
         if (!selfTests.Success)
         {
-            Console.Error.WriteLine("[FATAL] In-Process Self-Tests Thất Bại:");
+            Console.Error.WriteLine("[FATAL] In-Process Self-Tests Failed:");
             foreach (var err in selfTests.Errors)
             {
                 Console.Error.WriteLine($" - {err}");
@@ -34,7 +34,7 @@ public class Program
         Console.CancelKeyPress += (sender, eventArgs) =>
         {
             eventArgs.Cancel = true;
-            Logger.Info("Nhận tín hiệu hủy (Ctrl+C). Đang dừng tiến trình...");
+            Logger.Info("Cancellation signal received (Ctrl+C). Terminating process...");
             cts.Cancel();
         };
 
@@ -45,6 +45,50 @@ public class Program
             if (mode == "serve" || mode == "--serve")
             {
                 await McpServerHandler.RunAsync(cts.Token);
+            }
+            else if (mode == "scan" || mode == "--scan")
+            {
+                var options = ConnectionOptions.FromConfigOrEnvironment();
+                string outputDir = "./ai-context";
+                bool includeSystem = false;
+
+                for (int i = 1; i < args.Length; i++)
+                {
+                    var arg = args[i].Trim();
+                    if ((arg == "--server-alias" || arg == "--alias" || arg == "--server-name") && i + 1 < args.Length)
+                    {
+                        options.ServerAlias = args[++i].Trim().ToUpperInvariant();
+                    }
+                    else if ((arg == "--output" || arg == "-o") && i + 1 < args.Length)
+                    {
+                        outputDir = args[++i].Trim();
+                    }
+                    else if (arg == "--include-system")
+                    {
+                        includeSystem = true;
+                    }
+                }
+
+                var errors = options.Validate();
+                if (errors.Count > 0)
+                {
+                    Console.Error.WriteLine("[ERROR] Invalid configuration:");
+                    foreach (var err in errors) Console.Error.WriteLine($" - {err}");
+                    return 1;
+                }
+
+                Console.WriteLine($"[SCAN] Starting server scan for [{options.ServerAlias}] ({options.Server})...");
+                var sqlService = new SqlServerService();
+                var scanResult = await sqlService.ScanServerAsync(
+                    options,
+                    includeSystem: includeSystem,
+                    onProgress: msg => Console.WriteLine($" - {msg}"),
+                    cancellationToken: cts.Token
+                );
+
+                Console.WriteLine("Rendering AI Context documentation...");
+                var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outputDir, cts.Token);
+                Console.WriteLine($"[SUCCESS] Successfully generated {files.Count} files in '{Path.GetFullPath(outputDir)}'.");
             }
             else
             {
@@ -59,7 +103,7 @@ public class Program
         }
         catch (Exception ex)
         {
-            Logger.Error("Tiến trình kết thúc do ngoại lệ chưa được xử lý", ex);
+            Logger.Error("Process terminated due to an unhandled exception", ex);
             return 1;
         }
     }

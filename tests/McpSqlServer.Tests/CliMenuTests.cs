@@ -39,11 +39,11 @@ public class CliMenuTests
     public void TableFormatting_GeneratesCleanRows()
     {
         var db = new DatabaseItem(1, "test_database", "ONLINE", true, false);
-        var accessText = db.HasAccess.HasValue ? (db.HasAccess.Value ? "Có" : "Không") : "Không xác định";
+        var accessText = db.HasAccess.HasValue ? (db.HasAccess.Value ? "Yes" : "No") : "Unknown";
         var formatted = string.Format("{0,-30} {1,-15} {2,-15}", db.Name, db.State, accessText);
 
         Assert.Contains("test_database", formatted);
         Assert.Contains("ONLINE", formatted);
-        Assert.Contains("Có", formatted);
+        Assert.Contains("Yes", formatted);
     }
 }

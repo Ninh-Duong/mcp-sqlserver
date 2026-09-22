@@ -15,18 +15,18 @@ public class McpServerHandler
 
     public static async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        Logger.Info("Khởi động MCP SQL Server qua giao thức STDIO...");
+        Logger.Info("Starting MCP SQL Server over STDIO protocol...");
 
         var options = ConnectionOptions.FromConfigOrEnvironment();
         var validationErrors = options.Validate();
         if (validationErrors.Count > 0)
         {
-            Logger.Error("Thiếu thông tin kết nối cho MCP Server:");
+            Logger.Error("Missing connection settings for MCP Server:");
             foreach (var err in validationErrors)
             {
                 Logger.Error($" - {err}");
             }
-            Logger.Error("Vui lòng cấu hình file 'dbconfig.json' hoặc đặt biến môi trường: MSSQL_SERVER, MSSQL_USERNAME, MSSQL_PASSWORD.");
+            Logger.Error("Please configure 'dbconfig.json' or set environment variables: MSSQL_SERVER, MSSQL_USERNAME, MSSQL_PASSWORD.");
             Environment.Exit(1);
             return;
         }
@@ -58,7 +58,7 @@ public class McpServerHandler
             }
             catch (Exception ex)
             {
-                Logger.Error("Lỗi xử lý JSON-RPC MCP", ex);
+                Logger.Error("Error processing MCP JSON-RPC message", ex);
             }
         }
     }
@@ -116,7 +116,7 @@ public class McpServerHandler
                         new JsonObject
                         {
                             ["name"] = "test_connection",
-                            ["description"] = "Kiểm tra kết nối tới SQL Server instance theo cấu hình hiện tại.",
+                            ["description"] = "Verify connectivity to SQL Server instance with current configuration.",
                             ["inputSchema"] = new JsonObject
                             {
                                 ["type"] = "object",
@@ -126,7 +126,7 @@ public class McpServerHandler
                         new JsonObject
                         {
                             ["name"] = "list_databases",
-                            ["description"] = "Đếm và liệt kê danh sách database mà tài khoản đăng nhập hiện tại được phép nhìn thấy trên SQL Server.",
+                            ["description"] = "Count and enumerate databases visible to current login on SQL Server.",
                             ["inputSchema"] = new JsonObject
                             {
                                 ["type"] = "object",
@@ -136,7 +136,7 @@ public class McpServerHandler
                         new JsonObject
                         {
                             ["name"] = "list_tables",
-                            ["description"] = "Đếm và liệt kê danh sách table trong một database cụ thể.",
+                            ["description"] = "Count and list tables in a specific database.",
                             ["inputSchema"] = new JsonObject
                             {
                                 ["type"] = "object",
@@ -145,10 +145,65 @@ public class McpServerHandler
                                     ["database"] = new JsonObject
                                     {
                                         ["type"] = "string",
-                                        ["description"] = "Tên database cần kiểm tra table."
+                                        ["description"] = "Target database name to inspect tables."
                                     }
                                 },
                                 ["required"] = new JsonArray { "database" }
+                            }
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "scan_server_context",
+                            ["description"] = "Scan all databases on SQL Server (Tables, Columns, Data Types, PK, FK, Views, Stored Procedures, and SQL logic) and export token-optimized AI Context documentation.",
+                            ["inputSchema"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["server_alias"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Server or environment alias (e.g. DEV, UAT, PROD). Defaults to current configuration."
+                                    },
+                                    ["output_directory"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Directory to export AI Context documentation (default: ./ai-context)."
+                                    },
+                                    ["include_system"] = new JsonObject
+                                    {
+                                        ["type"] = "boolean",
+                                        ["description"] = "Whether to scan system databases (master, msdb, etc.) (default: false)."
+                                    }
+                                }
+                            }
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "execute_query",
+                            ["description"] = "Execute a safe, read-only SQL query (SELECT) on the database and return results in structured JSON. Automatically blocks modifying commands (INSERT, UPDATE, DELETE, DROP, etc.).",
+                            ["inputSchema"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["query"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "SQL SELECT or WITH ... SELECT statement to execute."
+                                    },
+                                    ["database"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Target database name to execute query against (defaults to configured initial database)."
+                                    },
+                                    ["max_rows"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["description"] = "Maximum number of rows to return (default: 100, max: 1000)."
+                                    }
+                                },
+                                ["required"] = new JsonArray { "query" }
                             }
                         }
                     }
@@ -157,6 +212,7 @@ public class McpServerHandler
             case "tools/call":
                 if (!root.TryGetProperty("params", out var paramsProp))
                 {
+                    Logger.Error("Invalid MCP request: Missing 'params' in tools/call.");
                     return CreateErrorResponse(idNode, -32602, "Missing 'params' in tools/call");
                 }
 
@@ -185,15 +241,86 @@ public class McpServerHandler
                     var resultText = JsonSerializer.Serialize(tableResult, new JsonSerializerOptions { WriteIndented = true });
                     return CreateToolResponse(idNode, resultText, isError: !tableResult.Success);
                 }
+                else if (toolName == "scan_server_context")
+                {
+                    var args = paramsProp.TryGetProperty("arguments", out var argsProp) ? argsProp : default;
+                    var alias = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("server_alias", out var aliasProp)
+                        ? aliasProp.GetString()
+                        : _options.ServerAlias;
+
+                    var outDir = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("output_directory", out var outDirProp)
+                        ? outDirProp.GetString()
+                        : "./ai-context";
+
+                    var includeSystem = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("include_system", out var sysProp) && sysProp.GetBoolean();
+
+                    var scanOptions = new ConnectionOptions
+                    {
+                        ServerAlias = string.IsNullOrWhiteSpace(alias) ? "DEV" : alias.Trim().ToUpperInvariant(),
+                        Server = _options.Server,
+                        Username = _options.Username,
+                        Password = _options.Password,
+                        Port = _options.Port,
+                        Database = _options.Database,
+                        Encrypt = _options.Encrypt,
+                        TrustServerCertificate = _options.TrustServerCertificate,
+                        ConnectTimeout = _options.ConnectTimeout,
+                        QueryTimeout = _options.QueryTimeout
+                    };
+
+                    var scanResult = await _sqlService.ScanServerAsync(scanOptions, includeSystem: includeSystem, cancellationToken: cancellationToken);
+                    var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir ?? "./ai-context", cancellationToken);
+
+                    var responseObj = new
+                    {
+                        server_alias = scanResult.ServerAlias,
+                        server_host = scanResult.ServerHost,
+                        database_count = scanResult.Databases.Count,
+                        files_created_count = files.Count,
+                        index_file = Path.Combine(outDir ?? "./ai-context", "INDEX.md"),
+                        output_directory = Path.GetFullPath(outDir ?? "./ai-context"),
+                        elapsed_ms = scanResult.ElapsedMs
+                    };
+
+                    var resultText = JsonSerializer.Serialize(responseObj, new JsonSerializerOptions { WriteIndented = true });
+                    return CreateToolResponse(idNode, resultText, isError: false);
+                }
+                else if (toolName == "execute_query")
+                {
+                    var args = paramsProp.TryGetProperty("arguments", out var argsProp) ? argsProp : default;
+                    var query = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("query", out var queryProp)
+                        ? queryProp.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(query))
+                    {
+                        Logger.Error("MCP tool 'execute_query' validation failure: Parameter 'query' cannot be empty.");
+                        return CreateErrorResponse(idNode, -32602, "Parameter 'query' cannot be empty.");
+                    }
+
+                    var dbName = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("database", out var dbProp)
+                        ? dbProp.GetString()
+                        : _options.Database;
+
+                    var maxRows = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("max_rows", out var maxRowsProp) && maxRowsProp.TryGetInt32(out var mr)
+                        ? mr
+                        : 100;
+
+                    var queryResult = await _sqlService.ExecuteQueryAsync(_options, query, dbName, maxRows, cancellationToken);
+                    var resultText = JsonSerializer.Serialize(queryResult, new JsonSerializerOptions { WriteIndented = true });
+                    return CreateToolResponse(idNode, resultText, isError: !queryResult.Success);
+                }
                 else
                 {
-                    return CreateErrorResponse(idNode, -32601, $"Tool '{toolName}' không tồn tại.");
+                    Logger.Error($"MCP tool not found: '{toolName}'");
+                    return CreateErrorResponse(idNode, -32601, $"Tool '{toolName}' not found.");
                 }
 
             default:
                 if (hasId)
                 {
-                    return CreateErrorResponse(idNode, -32601, $"Phương thức '{method}' không được hỗ trợ.");
+                    Logger.Error($"MCP method not supported: '{method}'");
+                    return CreateErrorResponse(idNode, -32601, $"Method '{method}' not supported.");
                 }
                 return null;
         }
