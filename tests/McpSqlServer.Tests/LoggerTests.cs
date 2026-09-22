@@ -38,4 +38,40 @@ public class LoggerTests
 
         Assert.Null(ex);
     }
+
+    [Fact]
+    public void Error_WritesToDedicatedErrorLogFile_WithSanitization()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_sql_logger_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Logger.Initialize(enableFileLogging: true, customLogDir: tempDir);
+            Logger.SetActivePassword("SecretKey123");
+
+            var testException = new InvalidOperationException("Connection failed for SecretKey123");
+            Logger.Error("Failed to connect with SecretKey123", testException);
+
+            var errorFile = Path.Combine(tempDir, "error.log");
+            var processFile = Path.Combine(tempDir, "process.log");
+
+            Assert.True(File.Exists(errorFile), "error.log should be created on error.");
+            Assert.True(File.Exists(processFile), "process.log should also be created.");
+
+            var errorContent = File.ReadAllText(errorFile);
+            Assert.Contains("[ERROR]", errorContent);
+            Assert.Contains("Failed to connect with ***", errorContent);
+            Assert.Contains("InvalidOperationException: Connection failed for ***", errorContent);
+            Assert.DoesNotContain("SecretKey123", errorContent);
+        }
+        finally
+        {
+            // Restore default logger configuration
+            Logger.SetActivePassword(null);
+            Logger.Initialize(enableFileLogging: true);
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
 }

@@ -6,14 +6,18 @@ public static class Logger
 {
     private static readonly Lock LockObj = new();
     private static string? _logFilePath;
+    private static string? _errorLogFilePath;
     private static string? _activePassword;
 
-    public static void Initialize(bool enableFileLogging = true)
+    public static string? LogFilePath => _logFilePath;
+    public static string? ErrorLogFilePath => _errorLogFilePath;
+
+    public static void Initialize(bool enableFileLogging = true, string? customLogDir = null)
     {
         if (enableFileLogging)
         {
-            // Relative path: ./logs/process.log
-            var logDir = Path.Combine(".", "logs");
+            // Relative path: ./logs/process.log and ./logs/error.log
+            var logDir = customLogDir ?? Path.Combine(".", "logs");
             try
             {
                 if (!Directory.Exists(logDir))
@@ -21,12 +25,19 @@ public static class Logger
                     Directory.CreateDirectory(logDir);
                 }
                 _logFilePath = Path.Combine(logDir, "process.log");
+                _errorLogFilePath = Path.Combine(logDir, "error.log");
             }
             catch
             {
                 // Fallback to stderr only if file creation fails
                 _logFilePath = null;
+                _errorLogFilePath = null;
             }
+        }
+        else
+        {
+            _logFilePath = null;
+            _errorLogFilePath = null;
         }
     }
 
@@ -81,6 +92,26 @@ public static class Logger
     {
         var fullMessage = ex != null ? $"{message} -> {ex.Message}" : message;
         Log("ERROR", fullMessage);
+
+        if (_errorLogFilePath != null)
+        {
+            var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            var errorDetails = ex != null
+                ? $"[{timestamp}] [ERROR] {Sanitize(message)}{Environment.NewLine}Exception: {Sanitize(ex.ToString())}"
+                : $"[{timestamp}] [ERROR] {Sanitize(message)}";
+
+            lock (LockObj)
+            {
+                try
+                {
+                    File.AppendAllText(_errorLogFilePath, errorDetails + Environment.NewLine);
+                }
+                catch
+                {
+                    // Ignore file write errors to avoid crashing process
+                }
+            }
+        }
     }
     public static void Process(string step, string message) => Log($"PROCESS:{step}", message);
 }

@@ -60,12 +60,12 @@ public class SqlServerServiceTests
         var result = new ConnectionCheckResult(
             Success: false,
             ElapsedMs: 120,
-            ErrorMessage: "Đăng nhập thất bại. Vui lòng kiểm tra lại Username và Password."
+            ErrorMessage: "Login failed. Please verify your Username and Password."
         );
 
         Assert.False(result.Success);
         Assert.Equal(120, result.ElapsedMs);
-        Assert.Contains("Đăng nhập thất bại", result.ErrorMessage);
+        Assert.Contains("Login failed", result.ErrorMessage);
         Assert.Null(result.ServerVersion);
     }
 

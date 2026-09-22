@@ -15,40 +15,40 @@ public static class PreflightChecker
         var passed = new List<string>();
         var errors = new List<string>();
 
-        // 1. Kiểm tra runtime version (.NET 10+)
+        // 1. Verify runtime version (.NET 10+)
         if (Environment.Version.Major >= 10)
         {
-            passed.Add($"Runtime .NET tương thích: v{Environment.Version}");
+            passed.Add($"Compatible .NET Runtime: v{Environment.Version}");
         }
         else
         {
-            errors.Add($"Yêu cầu .NET 10 trở lên. Runtime hiện tại: {Environment.Version}");
+            errors.Add($".NET 10 or higher required. Current runtime: {Environment.Version}");
         }
 
-        // 2. Kiểm tra package Microsoft.Data.SqlClient
+        // 2. Verify Microsoft.Data.SqlClient package
         try
         {
             var testConn = typeof(SqlConnection);
-            passed.Add($"Thư viện SqlClient sẵn sàng: {testConn.Assembly.GetName().Name} v{testConn.Assembly.GetName().Version}");
+            passed.Add($"SqlClient library ready: {testConn.Assembly.GetName().Name} v{testConn.Assembly.GetName().Version}");
         }
         catch (Exception ex)
         {
-            errors.Add($"Thiếu hoặc lỗi thư viện Microsoft.Data.SqlClient: {ex.Message}. Vui lòng chạy 'dotnet restore'.");
+            errors.Add($"Missing or faulty Microsoft.Data.SqlClient assembly: {ex.Message}. Please run 'dotnet restore'.");
         }
 
-        // 3. Kiểm tra JSON serializer & Cryptography
+        // 3. Verify JSON serializer & Cryptography
         try
         {
             var jsonType = typeof(System.Text.Json.JsonSerializer);
             var cryptoType = typeof(System.Security.Cryptography.Aes);
-            passed.Add("Thư viện System.Text.Json & Cryptography sẵn sàng.");
+            passed.Add("System.Text.Json and Cryptography libraries ready.");
         }
         catch (Exception ex)
         {
-            errors.Add($"Lỗi thư viện hệ thống: {ex.Message}");
+            errors.Add($"Core library error: {ex.Message}");
         }
 
-        // 4. Kiểm tra quyền ghi thư mục tương đối ./logs
+        // 4. Verify write permission to relative ./logs directory
         try
         {
             var testDir = Path.Combine(".", "logs");
@@ -59,11 +59,11 @@ public static class PreflightChecker
             var testFile = Path.Combine(testDir, ".preflight_check");
             File.WriteAllText(testFile, "ok");
             File.Delete(testFile);
-            passed.Add("Quyền truy cập thư mục tương đối ./logs hoạt động tốt.");
+            passed.Add("Write access to relative directory ./logs verified.");
         }
         catch (Exception ex)
         {
-            errors.Add($"Không thể ghi vào thư mục tương đối ./logs: {ex.Message}");
+            errors.Add($"Cannot write to relative directory ./logs: {ex.Message}");
         }
 
         return new PreflightReport(errors.Count == 0, passed, errors);
@@ -87,14 +87,14 @@ public static class PreflightChecker
             var validation = opts.Validate();
             if (validation.Count > 0)
             {
-                errors.Add($"SelfTest [ConnectionOptions.Validate] thất bại: {string.Join(", ", validation)}");
+                errors.Add($"SelfTest [ConnectionOptions.Validate] failed: {string.Join(", ", validation)}");
             }
             else
             {
                 var connStr = opts.BuildConnectionString();
                 if (!connStr.Contains("1433") || !connStr.Contains("sa"))
                 {
-                    errors.Add("SelfTest [ConnectionOptions.BuildConnectionString] kết quả không đúng.");
+                    errors.Add("SelfTest [ConnectionOptions.BuildConnectionString] returned invalid result.");
                 }
                 else
                 {
@@ -104,7 +104,7 @@ public static class PreflightChecker
         }
         catch (Exception ex)
         {
-            errors.Add($"SelfTest [ConnectionOptions] ngoại lệ: {ex.Message}");
+            errors.Add($"SelfTest [ConnectionOptions] exception: {ex.Message}");
         }
 
         // Test 2: Logger sanitization
@@ -115,7 +115,7 @@ public static class PreflightChecker
             var sanitized = Logger.Sanitize(testMsg);
             if (sanitized.Contains("SecretP@ss999"))
             {
-                errors.Add("SelfTest [Logger.Sanitize] không lọc được mật khẩu!");
+                errors.Add("SelfTest [Logger.Sanitize] failed to redact password!");
             }
             else
             {
@@ -124,7 +124,7 @@ public static class PreflightChecker
         }
         catch (Exception ex)
         {
-            errors.Add($"SelfTest [Logger] ngoại lệ: {ex.Message}");
+            errors.Add($"SelfTest [Logger] exception: {ex.Message}");
         }
 
         // Test 3: System database categorization logic
@@ -134,7 +134,7 @@ public static class PreflightChecker
             var userDb = new DatabaseItem(5, "AppDb", "ONLINE", true, false);
             if (!sysDb.IsSystem || userDb.IsSystem)
             {
-                errors.Add("SelfTest [DatabaseItem] logic phân loại hệ thống/người dùng sai!");
+                errors.Add("SelfTest [DatabaseItem] categorization logic incorrect!");
             }
             else
             {
@@ -143,7 +143,49 @@ public static class PreflightChecker
         }
         catch (Exception ex)
         {
-            errors.Add($"SelfTest [DatabaseItem] ngoại lệ: {ex.Message}");
+            errors.Add($"SelfTest [DatabaseItem] exception: {ex.Message}");
+        }
+
+        // Test 4: AI Context Schema Formatting & Data Type Formatter
+        try
+        {
+            var formattedType = SqlServerService.FormatDataType("nvarchar", 100, 0, 0);
+            var col = new ColumnSchemaItem("Username", formattedType, false, true, false, "dbo.Roles.Id");
+            var compactStr = col.ToCompactString();
+
+            if (formattedType != "nvarchar(50)" || !compactStr.Contains("PK") || !compactStr.Contains("FK -> dbo.Roles.Id"))
+            {
+                errors.Add($"SelfTest [AiContext.SchemaFormat] unexpected format: {compactStr}");
+            }
+            else
+            {
+                passed.Add("SelfTest [AiContext]: Schema Compact Formatting PASS.");
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"SelfTest [AiContext] exception: {ex.Message}");
+        }
+
+        // Test 5: Read-Only SQL Query Validator
+        try
+        {
+            var validSelect = SqlServerService.ValidateReadOnlyQuery("SELECT TOP 10 * FROM dbo.Orders WHERE Status = 'DELETED'");
+            var invalidDrop = SqlServerService.ValidateReadOnlyQuery("DROP TABLE dbo.Orders;");
+            var invalidInsert = SqlServerService.ValidateReadOnlyQuery("INSERT INTO dbo.Orders (Id) VALUES (1)");
+
+            if (!validSelect.IsValid || invalidDrop.IsValid || invalidInsert.IsValid)
+            {
+                errors.Add("SelfTest [ValidateReadOnlyQuery] read-only validator logic failed!");
+            }
+            else
+            {
+                passed.Add("SelfTest [SecurityGuard]: Read-Only SQL Validator PASS.");
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"SelfTest [ValidateReadOnlyQuery] exception: {ex.Message}");
         }
 
         return new PreflightReport(errors.Count == 0, passed, errors);

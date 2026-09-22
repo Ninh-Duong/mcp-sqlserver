@@ -1,37 +1,37 @@
 # Repository Governance & Engineering Rules
 
-Tài liệu quy định các nguyên tắc bắt buộc khi phát triển, vận hành và đóng góp mã nguồn cho repository `mcp-sqlserver`.
+This document specifies mandatory engineering and governance rules for developing, maintaining, and contributing to the `mcp-sqlserver` repository.
 
 ---
 
-## 1. Bảo mật & Zero-Leak Credentials
-1. **Tuyệt đối không commit bí mật:** Không bao giờ đưa username, password, token, connection string thực tế hoặc file cấu hình nhạy cảm lên Git.
-2. **Che giấu thông tin (Sanitization):** Mọi log lỗi, exception message và trace ghi ra stderr/file log phải tự động lọc bỏ hoặc thay thế mật khẩu bằng `***`.
-3. **Mật khẩu CLI:** Nhập mật khẩu trên terminal bắt buộc phải che ký tự (`*`), chỉ lưu tạm thời trong bộ nhớ phiên làm việc, không lưu ra file plain text.
+## 1. Security & Zero-Leak Credentials
+1. **Never commit secrets:** Never commit real usernames, passwords, tokens, connection strings, or sensitive configuration files to Git.
+2. **Data Sanitization:** All error logs, exception messages, and traces written to stderr or log files must automatically redact or replace passwords with `***`.
+3. **CLI Password Masking:** Password input in terminal must mask characters (`*`), be stored only in session memory, and never be persisted in plain text files.
 
 ---
 
-## 2. Quy tắc Đường dẫn Tương đối (100% Relative Paths)
-1. **Cấm tuyệt đối hardcoded absolute path:** Không sử dụng các đường dẫn tuyệt đối chứa ổ đĩa như `C:\...`, `D:\...`, hoặc `/home/...` trong code, test, script, log file path hay config.
-2. **Xác định đường dẫn chuẩn:** Mọi đường dẫn file/thư mục cục bộ (như thư mục log, publish, test assets) phải được tính tương đối từ working directory hoặc `AppContext.BaseDirectory`.
+## 2. Relative Path Rule (100% Relative Paths)
+1. **No hardcoded absolute paths:** Absolutely do not use hardcoded absolute drive paths like `C:\...`, `D:\...`, or `/home/...` in source code, tests, scripts, log file paths, or configurations.
+2. **Standard path resolution:** All local file/directory paths (logs, publish, test assets) must be computed relative to the working directory or `AppContext.BaseDirectory`.
 
 ---
 
-## 3. Quy tắc Run Gate & Unit Tests
-1. **100% Process Features có Unit Test:** Mọi tính năng nghiệp vụ (Pre-flight check, ConnectionOptions builder/validation, SQL parser/counter, Logger sanitizer, CLI masking, MCP tool contracts) đều phải có unit test tương ứng.
-2. **Bắt buộc Pass Test Mỗi Lần Khởi Chạy:**
-   - Khi chạy qua script (`./scripts/run.ps1`), toàn bộ unit test được thực thi trước. Nếu có bất kỳ test nào thất bại, script lập tức dừng tiến trình.
-   - Khi khởi động ứng dụng (kể cả standalone binary), hàm `PreflightChecker.RunCoreSelfTests()` sẽ chạy một bộ kiểm thử logic tự động in-process. Nếu fail, chương trình từ chối hoạt động.
+## 3. Run Gate & Unit Tests
+1. **100% Feature Test Coverage:** All process features (Pre-flight checks, ConnectionOptions builder/validation, SQL parser/validator, Logger sanitizer, CLI masking, MCP tool contracts) must have corresponding unit tests.
+2. **Mandatory Passing Tests on Every Run:**
+   - When executing via scripts (`./scripts/run.ps1`), all unit tests run first. If any test fails, execution stops immediately.
+   - When the application starts (including standalone binary), `PreflightChecker.RunCoreSelfTests()` executes an in-process self-test suite. If it fails, the application refuses to run.
 
 ---
 
-## 4. Tách bạch chuẩn STDIO cho MCP
-1. **Quy tắc luồng `stdout`:** Trong chế độ MCP (`mcp-sqlserver serve`), luồng `stdout` là tài nguyên độc quyền của giao thức JSON-RPC. Tuyệt đối không gọi `Console.WriteLine` hoặc xuất log trực tiếp ra `stdout`.
-2. **Quy tắc luồng `stderr`:** Mọi log chẩn đoán, tiến trình kết nối và thông báo lỗi hệ thống bắt buộc đẩy sang `Console.Error` (`stderr`) hoặc ghi vào file log tương đối `./logs/process.log`.
+## 4. Strict STDIO Separation for MCP
+1. **`stdout` stream rule:** In MCP server mode (`mcp-sqlserver serve`), the `stdout` stream is strictly reserved for the JSON-RPC protocol. Never call `Console.WriteLine` or output log messages to `stdout`.
+2. **`stderr` stream rule:** All diagnostic logs, connection progress, and error messages must be routed to `Console.Error` (`stderr`) or written to the relative log file `./logs/process.log`.
 
 ---
 
-## 5. Nguyên lý Ponytail (Tối giản & Hiệu năng)
-1. **Không abstraction dư thừa:** Không tạo interface cho lớp chỉ có 1 implementation; không dùng Factory pattern nếu có thể khởi tạo trực tiếp; không dùng ORM nặng nề khi 1 câu SQL `sys.databases` đã giải quyết trọn vẹn bài toán.
-2. **Cấu trúc hàm tối ưu:** Hàm ngắn gọn, đơn nhiệm, async xuyên suốt kèm `CancellationToken` cho mọi I/O và SQL query.
-3. **Xóa bỏ hơn là thêm vào:** Giữ codebase gọn gàng, loại bỏ mọi code dự phòng "để dành cho tương lai".
+## 5. Ponytail Principles (Minimalism & High Performance)
+1. **No unrequested abstractions:** No interfaces for classes with a single implementation; no Factory patterns when direct instantiation suffices; no heavy ORM when direct catalog queries solve the problem cleanly.
+2. **Async & Cancellation:** Short, single-purpose methods, fully asynchronous with `CancellationToken` support across all I/O and SQL queries.
+3. **Deletion over addition:** Keep the codebase clean and lean, eliminating speculative code and boilerplate.

@@ -4,7 +4,7 @@ public class CliMenu
 {
     private readonly SqlServerService _sqlService = new();
     private ConnectionOptions _options = new();
-    private string _connectionStatus = "Chưa kiểm tra kết nối";
+    private string _connectionStatus = "Connection not tested";
     private bool _hasConfigured = false;
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -12,15 +12,15 @@ public class CliMenu
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         Console.InputEncoding = System.Text.Encoding.UTF8;
 
-        // Tự động kiểm tra file config dbconfig.json
+        // Auto-load config from dbconfig.json if available
         var (loaded, fileOptions) = ConnectionOptions.TryLoadFromFile("dbconfig.json");
         if (loaded && fileOptions != null)
         {
             _options = fileOptions;
             _hasConfigured = true;
-            _connectionStatus = "Đã nạp từ dbconfig.json (Chưa kiểm tra)";
+            _connectionStatus = "Loaded from dbconfig.json (Not tested)";
             Logger.SetActivePassword(_options.Password);
-            Logger.Info("Tự động nạp thông tin kết nối từ file dbconfig.json thành công.");
+            Logger.Info("Automatically loaded connection settings from dbconfig.json.");
         }
 
         while (!cancellationToken.IsCancellationRequested)
@@ -39,13 +39,14 @@ public class CliMenu
 
             PrintHeader();
 
-            Console.WriteLine("1. Nhập / đổi thông tin kết nối");
-            Console.WriteLine("2. Kiểm tra kết nối");
-            Console.WriteLine("3. Đếm và liệt kê database");
-            Console.WriteLine("4. Đếm và liệt kê table trong database");
-            Console.WriteLine("0. Thoát");
+            Console.WriteLine("1. Configure connection settings");
+            Console.WriteLine("2. Test connection");
+            Console.WriteLine("3. List databases");
+            Console.WriteLine("4. List tables in database");
+            Console.WriteLine("5. Scan Server & Export AI Context Docs (DEV/UAT/PROD)");
+            Console.WriteLine("0. Exit");
             Console.WriteLine();
-            Console.Write("Chọn chức năng (0-4): ");
+            Console.Write("Select option (0-5): ");
 
             var choice = Console.ReadLine()?.Trim();
             if (choice == null) break; // Clean EOF
@@ -65,11 +66,14 @@ public class CliMenu
                 case "4":
                     await ListTablesInDatabaseAsync(cancellationToken);
                     break;
+                case "5":
+                    await ScanServerAndExportContextAsync(cancellationToken);
+                    break;
                 case "0":
-                    Console.WriteLine("Tạm biệt!");
+                    Console.WriteLine("Goodbye!");
                     return;
                 default:
-                    Console.WriteLine("Lựa chọn không hợp lệ. Nhấn Enter để tiếp tục...");
+                    Console.WriteLine("Invalid option. Press Enter to continue...");
                     Console.ReadLine();
                     break;
             }
@@ -81,26 +85,33 @@ public class CliMenu
         Console.WriteLine("========================================");
         Console.WriteLine("         MCP SQL SERVER CLI");
         Console.WriteLine("========================================");
-        Console.WriteLine($"Trạng thái: {_connectionStatus}");
+        Console.WriteLine($"Status: {_connectionStatus}");
         if (_hasConfigured)
         {
-            Console.WriteLine($"Cấu hình:   {_options.GetDisplaySummary()}");
+            Console.WriteLine($"Config: {_options.GetDisplaySummary()}");
         }
         Console.WriteLine("----------------------------------------");
     }
 
     private void ConfigureConnection()
     {
-        Console.WriteLine("--- NHẬP THÔNG TIN KẾT NỐI ---");
+        Console.WriteLine("--- CONFIGURE CONNECTION SETTINGS ---");
 
-        Console.Write($"Server name [hiện tại: {(_hasConfigured ? _options.Server : "chưa có")}]: ");
+        Console.Write($"Server Alias (DEV, UAT, PROD...) [current: {(_hasConfigured ? _options.ServerAlias : "DEV")}]: ");
+        var aliasInput = Console.ReadLine()?.Trim();
+        if (!string.IsNullOrEmpty(aliasInput))
+        {
+            _options.ServerAlias = aliasInput.ToUpperInvariant();
+        }
+
+        Console.Write($"Server name [current: {(_hasConfigured ? _options.Server : "none")}]: ");
         var serverInput = Console.ReadLine()?.Trim();
         if (!string.IsNullOrEmpty(serverInput) || !_hasConfigured)
         {
             _options.Server = serverInput ?? string.Empty;
         }
 
-        Console.Write($"Username [hiện tại: {(_hasConfigured ? _options.Username : "chưa có")}]: ");
+        Console.Write($"Username [current: {(_hasConfigured ? _options.Username : "none")}]: ");
         var userInput = Console.ReadLine()?.Trim();
         if (!string.IsNullOrEmpty(userInput) || !_hasConfigured)
         {
@@ -115,23 +126,23 @@ public class CliMenu
             Logger.SetActivePassword(passwordInput);
         }
 
-        Console.Write("Cấu hình nâng cao? [y/N]: ");
+        Console.Write("Advanced configuration? [y/N]: ");
         var advChoice = Console.ReadLine()?.Trim().ToLowerInvariant();
         if (advChoice == "y" || advChoice == "yes")
         {
-            Console.Write($"Port [mặc định: {_options.Port?.ToString() ?? "1433"}]: ");
+            Console.Write($"Port [default: {_options.Port?.ToString() ?? "1433"}]: ");
             var portInput = Console.ReadLine()?.Trim();
             if (int.TryParse(portInput, out var p)) _options.Port = p;
 
-            Console.Write($"Initial Database [mặc định: {_options.Database}]: ");
+            Console.Write($"Initial Database [default: {_options.Database}]: ");
             var dbInput = Console.ReadLine()?.Trim();
             if (!string.IsNullOrEmpty(dbInput)) _options.Database = dbInput;
 
-            Console.Write($"Trust Server Certificate? (bật nếu dùng self-signed cert) [y/N]: ");
+            Console.Write("Trust Server Certificate? (enable for self-signed SSL) [y/N]: ");
             var trustInput = Console.ReadLine()?.Trim().ToLowerInvariant();
             _options.TrustServerCertificate = (trustInput == "y" || trustInput == "yes");
 
-            Console.Write($"Connect Timeout (giây) [mặc định: {_options.ConnectTimeout}]: ");
+            Console.Write($"Connect Timeout (seconds) [default: {_options.ConnectTimeout}]: ");
             var timeoutInput = Console.ReadLine()?.Trim();
             if (int.TryParse(timeoutInput, out var t)) _options.ConnectTimeout = t;
         }
@@ -140,7 +151,7 @@ public class CliMenu
         if (validationErrors.Count > 0)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("Cấu hình chưa hợp lệ:");
+            Console.WriteLine("Invalid configuration:");
             foreach (var err in validationErrors)
             {
                 Console.WriteLine($" - {err}");
@@ -151,12 +162,12 @@ public class CliMenu
         else
         {
             _hasConfigured = true;
-            _connectionStatus = "Đã cập nhật thông tin (Chưa kiểm tra)";
+            _connectionStatus = "Configuration updated (Not tested)";
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("Cập nhật thông tin thành công!");
+            Console.WriteLine("Configuration updated successfully!");
             Console.ResetColor();
 
-            Console.Write("\nLưu cấu hình vào file 'dbconfig.json' để tự động nạp lần sau? [y/N]: ");
+            Console.Write("\nSave configuration to 'dbconfig.json' for future sessions? [y/N]: ");
             var saveChoice = Console.ReadLine()?.Trim().ToLowerInvariant();
             if (saveChoice == "y" || saveChoice == "yes")
             {
@@ -164,16 +175,16 @@ public class CliMenu
                 {
                     var json = System.Text.Json.JsonSerializer.Serialize(_options, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
                     File.WriteAllText("dbconfig.json", json);
-                    Console.WriteLine("Đã lưu vào file dbconfig.json thành công (file này đã được .gitignore bảo vệ).");
+                    Console.WriteLine("Saved to dbconfig.json successfully (protected by .gitignore).");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Không thể lưu file: {ex.Message}");
+                    Console.WriteLine($"Unable to save file: {ex.Message}");
                 }
             }
         }
 
-        Console.WriteLine("\nNhấn Enter để quay lại menu...");
+        Console.WriteLine("\nPress Enter to return to menu...");
         Console.ReadLine();
     }
 
@@ -181,29 +192,29 @@ public class CliMenu
     {
         if (!EnsureConfigured()) return;
 
-        Console.WriteLine("Đang kiểm tra kết nối...");
+        Console.WriteLine("Testing connection...");
         var result = await _sqlService.TestConnectionAsync(_options, cancellationToken);
 
         if (result.Success)
         {
-            _connectionStatus = $"Đã kết nối thành công ({result.ElapsedMs} ms)";
+            _connectionStatus = $"Connected successfully ({result.ElapsedMs} ms)";
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"[THÀNH CÔNG] Đã kết nối trong {result.ElapsedMs} ms.");
+            Console.WriteLine($"[SUCCESS] Connected in {result.ElapsedMs} ms.");
             if (!string.IsNullOrEmpty(result.ServerVersion))
             {
-                Console.WriteLine($"Phiên bản: {result.ServerVersion}");
+                Console.WriteLine($"Version: {result.ServerVersion}");
             }
             Console.ResetColor();
         }
         else
         {
-            _connectionStatus = "Kết nối thất bại";
+            _connectionStatus = "Connection failed";
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"[THẤT BẠI] {result.ErrorMessage}");
+            Console.WriteLine($"[FAILED] {result.ErrorMessage}");
             Console.ResetColor();
         }
 
-        Console.WriteLine("\nNhấn Enter để tiếp tục...");
+        Console.WriteLine("\nPress Enter to continue...");
         Console.ReadLine();
     }
 
@@ -211,39 +222,39 @@ public class CliMenu
     {
         if (!EnsureConfigured()) return;
 
-        Console.WriteLine("Đang lấy danh sách database...");
+        Console.WriteLine("Fetching database list...");
         var result = await _sqlService.ListDatabasesAsync(_options, cancellationToken);
 
         if (result.Success)
         {
-            _connectionStatus = "Đã lấy danh sách DB thành công";
+            _connectionStatus = "Database list retrieved successfully";
             Console.WriteLine();
-            Console.WriteLine($"Database tài khoản nhìn thấy: {result.VisibleCount}");
-            Console.WriteLine($"  Hệ thống: {result.SystemCount} | Khác: {result.OtherCount}");
+            Console.WriteLine($"Databases visible to account: {result.VisibleCount}");
+            Console.WriteLine($"  System: {result.SystemCount} | User: {result.OtherCount}");
             Console.WriteLine();
 
-            Console.WriteLine("{0,-30} {1,-15} {2,-15}", "Tên", "Trạng thái", "Truy cập DB");
+            Console.WriteLine("{0,-30} {1,-15} {2,-15}", "Name", "State", "Access");
             Console.WriteLine(new string('-', 60));
 
             foreach (var db in result.Databases)
             {
-                var accessText = db.HasAccess.HasValue ? (db.HasAccess.Value ? "Có" : "Không") : "Không xác định";
+                var accessText = db.HasAccess.HasValue ? (db.HasAccess.Value ? "Yes" : "No") : "Unknown";
                 Console.WriteLine("{0,-30} {1,-15} {2,-15}", db.Name, db.State, accessText);
             }
 
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.DarkYellow;
-            Console.WriteLine("* Lưu ý: Đây là danh sách theo quyền của tài khoản hiện tại trên SQL Server.");
+            Console.WriteLine("* Note: This listing reflects permissions of the current login on SQL Server.");
             Console.ResetColor();
         }
         else
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"[LỖI] {result.ErrorMessage}");
+            Console.WriteLine($"[ERROR] {result.ErrorMessage}");
             Console.ResetColor();
         }
 
-        Console.WriteLine("\nNhấn Enter để quay lại menu...");
+        Console.WriteLine("\nPress Enter to return to menu...");
         Console.ReadLine();
     }
 
@@ -251,29 +262,29 @@ public class CliMenu
     {
         if (!EnsureConfigured()) return;
 
-        Console.Write($"Nhập tên database [mặc định: {_options.Database}]: ");
+        Console.Write($"Enter database name [default: {_options.Database}]: ");
         var inputDb = Console.ReadLine()?.Trim();
         var targetDb = string.IsNullOrWhiteSpace(inputDb) ? _options.Database : inputDb;
 
-        Console.WriteLine($"Đang lấy danh sách table trong database '{targetDb}'...");
+        Console.WriteLine($"Fetching table list for database '{targetDb}'...");
         var result = await _sqlService.ListTablesAsync(_options, targetDb, cancellationToken);
 
         if (result.Success)
         {
-            _connectionStatus = $"Đã lấy danh sách table ({targetDb})";
+            _connectionStatus = $"Retrieved tables ({targetDb})";
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Tổng số table trong database '{result.Database}': {result.TableCount}");
+            Console.WriteLine($"Total tables in database '{result.Database}': {result.TableCount}");
             Console.ResetColor();
             Console.WriteLine();
 
             if (result.TableCount == 0)
             {
-                Console.WriteLine("Database không có table nào hoặc tài khoản chưa được cấp quyền SELECT metadata.");
+                Console.WriteLine("No tables found or login lacks metadata SELECT permissions.");
             }
             else
             {
-                Console.WriteLine("{0,-20} {1,-40}", "Schema", "Tên Table");
+                Console.WriteLine("{0,-20} {1,-40}", "Schema", "Table Name");
                 Console.WriteLine(new string('-', 60));
 
                 foreach (var table in result.Tables)
@@ -285,11 +296,75 @@ public class CliMenu
         else
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"[LỖI] {result.ErrorMessage}");
+            Console.WriteLine($"[ERROR] {result.ErrorMessage}");
             Console.ResetColor();
         }
 
-        Console.WriteLine("\nNhấn Enter để quay lại menu...");
+        Console.WriteLine("\nPress Enter to return to menu...");
+        Console.ReadLine();
+    }
+
+    private async Task ScanServerAndExportContextAsync(CancellationToken cancellationToken)
+    {
+        if (!EnsureConfigured()) return;
+
+        Console.WriteLine("==================================================");
+        Console.WriteLine("     FULL SERVER SCAN & AI CONTEXT GENERATOR");
+        Console.WriteLine("==================================================");
+        Console.WriteLine($"Server: {_options.Server} (Host: {_options.Server})");
+        Console.Write($"Confirm Server Alias (DEV, UAT, PROD...) [current: {_options.ServerAlias}]: ");
+        var aliasInput = Console.ReadLine()?.Trim();
+        if (!string.IsNullOrEmpty(aliasInput))
+        {
+            _options.ServerAlias = aliasInput.ToUpperInvariant();
+        }
+
+        Console.Write("Include system databases (master, msdb, etc.)? [y/N]: ");
+        var sysChoice = Console.ReadLine()?.Trim().ToLowerInvariant();
+        var includeSystem = sysChoice == "y" || sysChoice == "yes";
+
+        Console.Write("Export directory [default: ./ai-context]: ");
+        var outDir = Console.ReadLine()?.Trim();
+        if (string.IsNullOrEmpty(outDir)) outDir = "./ai-context";
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine($"[START] Scanning server '{_options.ServerAlias}'...");
+        Console.ResetColor();
+
+        try
+        {
+            var scanResult = await _sqlService.ScanServerAsync(
+                _options,
+                includeSystem: includeSystem,
+                onProgress: msg => Console.WriteLine($" - {msg}"),
+                cancellationToken: cancellationToken
+            );
+
+            Console.WriteLine();
+            Console.WriteLine("Exporting AI Context documentation (Progressive Disclosure)...");
+            var createdFiles = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir, cancellationToken);
+
+            _connectionStatus = $"Scanned server {_options.ServerAlias} ({scanResult.Databases.Count} DBs)";
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine();
+            Console.WriteLine("==================================================");
+            Console.WriteLine($"[SUCCESS] Finished scanning Server '{scanResult.ServerAlias}' in {scanResult.ElapsedMs} ms!");
+            Console.WriteLine($" - Total Databases scanned: {scanResult.Databases.Count}");
+            Console.WriteLine($" - Total files created: {createdFiles.Count}");
+            Console.WriteLine($" - Root directory: {Path.GetFullPath(outDir)}");
+            Console.WriteLine($" - Central Index: {Path.Combine(outDir, "INDEX.md")}");
+            Console.WriteLine("==================================================");
+            Console.ResetColor();
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"\n[FAILED] Scan process interrupted: {Logger.Sanitize(ex.Message)}");
+            Console.ResetColor();
+        }
+
+        Console.WriteLine("\nPress Enter to return to menu...");
         Console.ReadLine();
     }
 
@@ -298,9 +373,9 @@ public class CliMenu
         if (!_hasConfigured)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("Vui lòng chọn mục '1' để nhập thông tin kết nối trước!");
+            Console.WriteLine("Please select option '1' to configure connection settings first!");
             Console.ResetColor();
-            Console.WriteLine("\nNhấn Enter để tiếp tục...");
+            Console.WriteLine("\nPress Enter to continue...");
             Console.ReadLine();
             return false;
         }

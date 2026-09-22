@@ -29,6 +29,9 @@ secrets/
 logs/
 process.log
 
+# AI Context & generated documentation
+ai-context/
+
 # Operating system artifacts
 Thumbs.db
 Desktop.ini
