@@ -205,6 +205,39 @@ public class McpServerHandler
                                 },
                                 ["required"] = new JsonArray { "query" }
                             }
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "search_context",
+                            ["description"] = "Instant, token-optimized local search across all databases for tables, columns, procedures, views, functions, and triggers without reading large files.",
+                            ["inputSchema"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["query"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Keyword or name of table, column, procedure, view, function, or trigger to locate."
+                                    },
+                                    ["target"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional search filter: 'all' (default), 'table', 'column', 'routine', 'procedure', 'view', 'function', 'trigger'."
+                                    },
+                                    ["database"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional target database name to restrict search."
+                                    },
+                                    ["limit"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["description"] = "Maximum number of matches to return (default: 20, max: 100)."
+                                    }
+                                },
+                                ["required"] = new JsonArray { "query" }
+                            }
                         }
                     }
                 });
@@ -309,6 +342,35 @@ public class McpServerHandler
                     var queryResult = await _sqlService.ExecuteQueryAsync(_options, query, dbName, maxRows, cancellationToken);
                     var resultText = JsonSerializer.Serialize(queryResult, new JsonSerializerOptions { WriteIndented = true });
                     return CreateToolResponse(idNode, resultText, isError: !queryResult.Success);
+                }
+                else if (toolName == "search_context")
+                {
+                    var args = paramsProp.TryGetProperty("arguments", out var argsProp) ? argsProp : default;
+                    var query = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("query", out var qProp)
+                        ? qProp.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(query))
+                    {
+                        Logger.Error("MCP tool 'search_context' validation failure: Parameter 'query' cannot be empty.");
+                        return CreateErrorResponse(idNode, -32602, "Parameter 'query' cannot be empty.");
+                    }
+
+                    var target = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("target", out var targetProp)
+                        ? targetProp.GetString()
+                        : "all";
+
+                    var database = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("database", out var dbProp)
+                        ? dbProp.GetString()
+                        : null;
+
+                    var limit = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("limit", out var limProp) && limProp.TryGetInt32(out var l)
+                        ? Math.Clamp(l, 1, 100)
+                        : 20;
+
+                    var searchResult = await AiContextRenderer.SearchContextAsync("./ai-context", query, database, target, limit, cancellationToken);
+                    var resultText = JsonSerializer.Serialize(searchResult, new JsonSerializerOptions { WriteIndented = true });
+                    return CreateToolResponse(idNode, resultText, isError: false);
                 }
                 else
                 {
