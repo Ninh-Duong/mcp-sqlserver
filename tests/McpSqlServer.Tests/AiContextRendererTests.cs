@@ -197,4 +197,155 @@ public class AiContextRendererTests
         var compact = col.ToCompactString();
         Assert.Contains("Description: 1=Active, 2=Suspended, 3=Closed", compact);
     }
+
+    [Fact]
+    public void ColumnSchemaItem_WithDefaultValue_RendersDefault()
+    {
+        var col = new ColumnSchemaItem(
+            Name: "CreatedAt",
+            DataType: "datetime2",
+            IsNullable: false,
+            IsPrimaryKey: false,
+            IsIdentity: false,
+            DefaultValue: "(getutcdate())"
+        );
+
+        var compact = col.ToCompactString();
+        Assert.Contains("Default: (getutcdate())", compact);
+    }
+
+    [Fact]
+    public void IndexSchemaItem_ToCompactString_FormatsCorrectly()
+    {
+        var idx = new IndexSchemaItem("IX_User_Email", true, false, "NONCLUSTERED", ["Email"], "IsDeleted = 0");
+        var compact = idx.ToCompactString();
+        Assert.Equal("IX_User_Email: [Email] (UNIQUE, WHERE IsDeleted = 0)", compact);
+    }
+
+    [Fact]
+    public void RenderCompactSchema_RendersFunctionsTriggersIndexesAndConstraints()
+    {
+        var cols = new List<ColumnSchemaItem>
+        {
+            new("Id", "int", false, true, true),
+            new("Email", "nvarchar(100)", false, false, false, DefaultValue: "('')")
+        };
+        var indexes = new List<IndexSchemaItem>
+        {
+            new("UQ_User_Email", true, false, "NONCLUSTERED", ["Email"])
+        };
+        var checkConstraints = new List<CheckConstraintItem>
+        {
+            new("CK_User_Email", "([Email]<>'')")
+        };
+        var triggers = new List<TriggerSchemaItem>
+        {
+            new("dbo", "trg_User_Audit", "dbo", "Users", "AFTER INSERT, UPDATE", false, "CREATE TRIGGER trg_User_Audit ...")
+        };
+
+        var tables = new List<TableSchemaItem>
+        {
+            new("dbo", "Users", cols, indexes, triggers, checkConstraints)
+        };
+        var views = new List<ViewSchemaItem>();
+        var procs = new List<ProcedureSchemaItem>();
+        var funcs = new List<FunctionSchemaItem>
+        {
+            new("dbo", "fn_GetActiveUsers", "TABLE", ["@TenantId int"], "CREATE FUNCTION ...")
+        };
+
+        var report = new DatabaseScanReport(
+            DatabaseName: "TestDb",
+            Success: true,
+            TableCount: 1,
+            ViewCount: 0,
+            ProcedureCount: 0,
+            Tables: tables,
+            Views: views,
+            Procedures: procs,
+            FunctionCount: 1,
+            TriggerCount: 1,
+            Functions: funcs,
+            Triggers: triggers
+        );
+
+        var markdown = AiContextRenderer.RenderCompactSchema("DEV", report);
+
+        Assert.Contains("Indexes: UQ_User_Email: [Email] (UNIQUE)", markdown);
+        Assert.Contains("Check Constraints: CK_User_Email: ([Email]<>'')", markdown);
+        Assert.Contains("Triggers: trg_User_Audit (AFTER INSERT, UPDATE)", markdown);
+        Assert.Contains("Default: ('')", markdown);
+        Assert.Contains("## 4. Functions Summary", markdown);
+        Assert.Contains("fn_GetActiveUsers", markdown);
+        Assert.Contains("## 5. Triggers Summary", markdown);
+        Assert.Contains("trg_User_Audit", markdown);
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_FindsTablesColumnsAndRoutines()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var scanResult = new ServerScanResult(
+                ServerAlias: "DEV",
+                ServerHost: "sql-dev.local",
+                ServerVersion: "SQL Server 2022",
+                ScannedAt: DateTime.Now,
+                ElapsedMs: 100,
+                Databases:
+                [
+                    new DatabaseScanReport(
+                        DatabaseName: "CrmDb",
+                        Success: true,
+                        TableCount: 1,
+                        ViewCount: 0,
+                        ProcedureCount: 1,
+                        Tables:
+                        [
+                            new TableSchemaItem("dbo", "Customers", [
+                                new ColumnSchemaItem("Id", "int", false, true, true),
+                                new ColumnSchemaItem("Phone", "varchar(20)", true, false, false)
+                            ])
+                        ],
+                        Views: [],
+                        Procedures:
+                        [
+                            new ProcedureSchemaItem("dbo", "sp_FindCustomer", ["@Phone varchar(20)"], "SELECT 1")
+                        ]
+                    )
+                ]
+            );
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            // Test search by table name
+            var tableSearch = await AiContextRenderer.SearchContextAsync(tempDir, "Customer", target: "table");
+            Assert.True(tableSearch.TotalMatches > 0);
+            Assert.Contains(tableSearch.Matches, m => m.Type == "table" && m.Name.Contains("Customer"));
+
+            // Test search by column name
+            var colSearch = await AiContextRenderer.SearchContextAsync(tempDir, "Phone", target: "column");
+            Assert.True(colSearch.TotalMatches > 0);
+            Assert.Contains(colSearch.Matches, m => m.Type == "column" && m.Name.Contains("Phone"));
+
+            // Test search by procedure name
+            var procSearch = await AiContextRenderer.SearchContextAsync(tempDir, "FindCustomer", target: "routine");
+            Assert.True(procSearch.TotalMatches > 0);
+            Assert.Contains(procSearch.Matches, m => m.Type == "procedure" && m.Name.Contains("FindCustomer"));
+
+            // Verify TABLES_ROUTER.compact.md was created
+            var routerPath = Path.Combine(tempDir, "servers", "DEV", "TABLES_ROUTER.compact.md");
+            Assert.True(File.Exists(routerPath));
+            var routerContent = await File.ReadAllTextAsync(routerPath);
+            Assert.Contains("Customers", routerContent);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
 }

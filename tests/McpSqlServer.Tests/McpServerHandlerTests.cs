@@ -47,7 +47,7 @@ public class McpServerHandlerTests
         Assert.Equal(2, root.GetProperty("id").GetInt64());
         var tools = root.GetProperty("result").GetProperty("tools");
 
-        Assert.Equal(5, tools.GetArrayLength());
+        Assert.Equal(6, tools.GetArrayLength());
 
         var toolNames = new List<string>();
         foreach (var tool in tools.EnumerateArray())
@@ -60,6 +60,7 @@ public class McpServerHandlerTests
         Assert.Contains("list_tables", toolNames);
         Assert.Contains("scan_server_context", toolNames);
         Assert.Contains("execute_query", toolNames);
+        Assert.Contains("search_context", toolNames);
     }
 
     [Fact]
@@ -179,5 +180,22 @@ public class McpServerHandlerTests
 
         Assert.True(root.TryGetProperty("error", out var errorProp));
         Assert.Equal(-32602, errorProp.GetProperty("code").GetInt32());
+    }
+
+    [Fact]
+    public async Task HandleMessageAsync_SearchContext_ReturnsResult()
+    {
+        var handler = new McpServerHandler(_dummyOptions);
+        var request = """{"jsonrpc": "2.0", "id": 53, "method": "tools/call", "params": {"name": "search_context", "arguments": {"query": "Lead"}}}""";
+
+        var response = await handler.HandleMessageAsync(request);
+
+        Assert.NotNull(response);
+        using var doc = JsonDocument.Parse(response);
+        var root = doc.RootElement;
+
+        Assert.Equal(53, root.GetProperty("id").GetInt64());
+        var result = root.GetProperty("result");
+        Assert.False(result.GetProperty("isError").GetBoolean());
     }
 }

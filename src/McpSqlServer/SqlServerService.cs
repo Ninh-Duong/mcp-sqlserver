@@ -307,7 +307,7 @@ ORDER BY s.name, t.name;";
             await using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
-            // 1. Scan Tables & Columns (including Data Types, PK, FK, Nullable, Identity, Description)
+            // 1. Scan Tables & Columns (including Data Types, PK, FK, Nullable, Identity, Description, Default Value)
             var tableDict = new Dictionary<string, (string Schema, string Name, List<ColumnSchemaItem> Columns)>();
             const string queryTablesAndColumns = @"
 SELECT
@@ -322,7 +322,8 @@ SELECT
     c.is_identity,
     ISNULL(pk.is_primary_key, 0) AS is_pk,
     fk.referenced_target,
-    CAST(ep.value AS NVARCHAR(MAX)) AS column_description
+    CAST(ep.value AS NVARCHAR(MAX)) AS column_description,
+    dc.definition AS default_value
 FROM sys.tables t
 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 INNER JOIN sys.columns c ON t.object_id = c.object_id
@@ -343,6 +344,7 @@ LEFT JOIN (
     INNER JOIN sys.schemas ref_s ON ref_t.schema_id = ref_s.schema_id
     INNER JOIN sys.columns ref_c ON fkc.referenced_object_id = ref_c.object_id AND fkc.referenced_column_id = ref_c.column_id
 ) fk ON t.object_id = fk.parent_object_id AND c.column_id = fk.parent_column_id
+LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
 LEFT JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND c.column_id = ep.minor_id AND ep.name = 'MS_Description'
 ORDER BY s.name, t.name, c.column_id;";
 
@@ -365,9 +367,10 @@ ORDER BY s.name, t.name, c.column_id;";
                     var isPk = reader.GetInt32(9) == 1;
                     var fkRef = reader.IsDBNull(10) ? null : reader.GetString(10);
                     var colDesc = reader.IsDBNull(11) ? null : reader.GetString(11);
+                    var defVal = reader.IsDBNull(12) ? null : reader.GetString(12);
 
                     var formattedType = FormatDataType(typeName, maxLen, precision, scale);
-                    var colItem = new ColumnSchemaItem(column, formattedType, isNullable, isPk, isIdentity, fkRef, colDesc);
+                    var colItem = new ColumnSchemaItem(column, formattedType, isNullable, isPk, isIdentity, fkRef, colDesc, defVal);
 
                     var tableKey = $"{schema}.{table}";
                     if (!tableDict.TryGetValue(tableKey, out var val))
@@ -379,11 +382,184 @@ ORDER BY s.name, t.name, c.column_id;";
                 }
             }
 
-            var tables = tableDict.Values
-                .Select(t => new TableSchemaItem(t.Schema, t.Name, t.Columns))
-                .ToList();
+            // 2. Scan Check Constraints
+            var checkConstraintsMap = new Dictionary<string, List<CheckConstraintItem>>(StringComparer.OrdinalIgnoreCase);
+            const string queryCheckConstraints = @"
+SELECT 
+    s.name AS schema_name,
+    t.name AS table_name,
+    cc.name AS constraint_name,
+    cc.definition
+FROM sys.check_constraints cc
+INNER JOIN sys.tables t ON cc.parent_object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE cc.is_ms_shipped = 0
+ORDER BY s.name, t.name, cc.name;";
 
-            // 2. Scan Views & SQL Logic
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryCheckConstraints;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var table = reader.GetString(1);
+                    var name = reader.GetString(2);
+                    var def = reader.GetString(3);
+
+                    var tableKey = $"{schema}.{table}";
+                    if (!checkConstraintsMap.TryGetValue(tableKey, out var list))
+                    {
+                        list = new List<CheckConstraintItem>();
+                        checkConstraintsMap[tableKey] = list;
+                    }
+                    list.Add(new CheckConstraintItem(name, def));
+                }
+            }
+
+            // 3. Scan Indexes
+            var indexColMap = new Dictionary<string, Dictionary<string, (bool IsUnique, bool IsPk, string TypeDesc, string? FilterDef, List<string> Columns)>>(StringComparer.OrdinalIgnoreCase);
+            const string queryIndexes = @"
+SELECT 
+    s.name AS schema_name,
+    t.name AS table_name,
+    i.name AS index_name,
+    i.is_unique,
+    i.is_primary_key,
+    i.type_desc,
+    c.name AS column_name,
+    i.filter_definition
+FROM sys.indexes i
+INNER JOIN sys.tables t ON i.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE i.index_id > 0 AND i.is_hypothetical = 0
+ORDER BY s.name, t.name, i.name, ic.key_ordinal;";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryIndexes;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var table = reader.GetString(1);
+                    var indexName = reader.GetString(2);
+                    var isUnique = reader.GetBoolean(3);
+                    var isPk = reader.GetBoolean(4);
+                    var typeDesc = reader.GetString(5);
+                    var colName = reader.GetString(6);
+                    var filterDef = reader.IsDBNull(7) ? null : reader.GetString(7);
+
+                    var tableKey = $"{schema}.{table}";
+                    if (!indexColMap.TryGetValue(tableKey, out var indices))
+                    {
+                        indices = new Dictionary<string, (bool, bool, string, string?, List<string>)>(StringComparer.OrdinalIgnoreCase);
+                        indexColMap[tableKey] = indices;
+                    }
+
+                    if (!indices.TryGetValue(indexName, out var idxData))
+                    {
+                        idxData = (isUnique, isPk, typeDesc, filterDef, new List<string>());
+                        indices[indexName] = idxData;
+                    }
+                    idxData.Columns.Add(colName);
+                }
+            }
+
+            // 4. Scan Triggers
+            var triggersMap = new Dictionary<string, List<TriggerSchemaItem>>(StringComparer.OrdinalIgnoreCase);
+            var allTriggers = new List<TriggerSchemaItem>();
+            const string queryTriggers = @"
+SELECT 
+    ts.name AS schema_name,
+    tr.name AS trigger_name,
+    ts.name AS table_schema,
+    t.name AS table_name,
+    OBJECTPROPERTY(tr.object_id, 'ExecIsInsertTrigger') AS is_insert,
+    OBJECTPROPERTY(tr.object_id, 'ExecIsUpdateTrigger') AS is_update,
+    OBJECTPROPERTY(tr.object_id, 'ExecIsDeleteTrigger') AS is_delete,
+    tr.is_instead_of_trigger AS is_instead_of,
+    tr.is_disabled,
+    m.definition AS trigger_definition
+FROM sys.triggers tr
+INNER JOIN sys.tables t ON tr.parent_id = t.object_id
+INNER JOIN sys.schemas ts ON t.schema_id = ts.schema_id
+LEFT JOIN sys.sql_modules m ON tr.object_id = m.object_id
+WHERE tr.is_ms_shipped = 0
+ORDER BY ts.name, t.name, tr.name;";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryTriggers;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var triggerSchema = reader.GetString(0);
+                    var triggerName = reader.GetString(1);
+                    var tableSchema = reader.GetString(2);
+                    var tableName = reader.GetString(3);
+                    var isInsert = !reader.IsDBNull(4) && reader.GetInt32(4) == 1;
+                    var isUpdate = !reader.IsDBNull(5) && reader.GetInt32(5) == 1;
+                    var isDelete = !reader.IsDBNull(6) && reader.GetInt32(6) == 1;
+                    var isInsteadOf = reader.GetBoolean(7);
+                    var isDisabled = reader.GetBoolean(8);
+                    var def = reader.IsDBNull(9) ? "-- [Definition hidden or restricted by permissions]" : reader.GetString(9);
+
+                    var eventList = new List<string>();
+                    if (isInsert) eventList.Add("INSERT");
+                    if (isUpdate) eventList.Add("UPDATE");
+                    if (isDelete) eventList.Add("DELETE");
+                    var timing = isInsteadOf ? "INSTEAD OF" : "AFTER";
+                    var eventsStr = eventList.Count > 0 ? $"{timing} {string.Join(", ", eventList)}" : timing;
+
+                    var trgItem = new TriggerSchemaItem(triggerSchema, triggerName, tableSchema, tableName, eventsStr, isDisabled, def);
+                    allTriggers.Add(trgItem);
+
+                    var tableKey = $"{tableSchema}.{tableName}";
+                    if (!triggersMap.TryGetValue(tableKey, out var trgList))
+                    {
+                        trgList = new List<TriggerSchemaItem>();
+                        triggersMap[tableKey] = trgList;
+                    }
+                    trgList.Add(trgItem);
+                }
+            }
+
+            // Build Tables with Indexes, Triggers, and Check Constraints
+            var tables = new List<TableSchemaItem>();
+            foreach (var kv in tableDict)
+            {
+                var tableKey = kv.Key;
+                var t = kv.Value;
+
+                var tableIndices = new List<IndexSchemaItem>();
+                if (indexColMap.TryGetValue(tableKey, out var idxDict))
+                {
+                    foreach (var idx in idxDict)
+                    {
+                        tableIndices.Add(new IndexSchemaItem(
+                            Name: idx.Key,
+                            IsUnique: idx.Value.IsUnique,
+                            IsPrimaryKey: idx.Value.IsPk,
+                            TypeDesc: idx.Value.TypeDesc,
+                            Columns: idx.Value.Columns,
+                            FilterDefinition: idx.Value.FilterDef
+                        ));
+                    }
+                }
+
+                IReadOnlyList<TriggerSchemaItem> tableTrgs = triggersMap.TryGetValue(tableKey, out var trgs) ? trgs : Array.Empty<TriggerSchemaItem>();
+                IReadOnlyList<CheckConstraintItem> tableCks = checkConstraintsMap.TryGetValue(tableKey, out var cks) ? cks : Array.Empty<CheckConstraintItem>();
+
+                tables.Add(new TableSchemaItem(t.Schema, t.Name, t.Columns, tableIndices, tableTrgs, tableCks));
+            }
+
+            // 5. Scan Views & SQL Logic
             var views = new List<ViewSchemaItem>();
             const string queryViews = @"
 SELECT 
@@ -410,7 +586,90 @@ ORDER BY s.name, v.name;
                 }
             }
 
-            // 3. Scan Stored Procedures & Parameters & SQL Logic
+            // 6. Scan Functions (Scalar, Inline TVF, Multi-Statement TVF) & SQL Logic
+            var funcMap = new Dictionary<int, (string Schema, string Name, string TypeDesc, string? Def, List<string> Params)>();
+            const string queryFuncs = @"
+SELECT 
+    s.name AS schema_name,
+    o.name AS func_name,
+    o.type_desc,
+    m.definition AS func_definition,
+    o.object_id
+FROM sys.objects o
+INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+LEFT JOIN sys.sql_modules m ON o.object_id = m.object_id
+WHERE o.type IN ('FN', 'IF', 'TF') AND o.is_ms_shipped = 0
+ORDER BY s.name, o.name;
+";
+
+            await using (var cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = queryFuncs;
+                cmd.CommandTimeout = options.QueryTimeout;
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var schema = reader.GetString(0);
+                    var funcName = reader.GetString(1);
+                    var typeDesc = reader.GetString(2);
+                    var def = reader.IsDBNull(3) ? "-- [Definition hidden or restricted by permissions]" : reader.GetString(3);
+                    var objId = reader.GetInt32(4);
+                    funcMap[objId] = (schema, funcName, typeDesc, def, new List<string>());
+                }
+            }
+
+            if (funcMap.Count > 0)
+            {
+                const string queryFuncParams = @"
+SELECT 
+    pm.object_id,
+    pm.name AS param_name,
+    ty.name AS type_name,
+    pm.max_length,
+    pm.precision,
+    pm.scale,
+    pm.is_output,
+    pm.parameter_id
+FROM sys.parameters pm
+INNER JOIN sys.types ty ON pm.user_type_id = ty.user_type_id
+INNER JOIN sys.objects o ON pm.object_id = o.object_id
+WHERE o.type IN ('FN', 'IF', 'TF') AND o.is_ms_shipped = 0
+ORDER BY pm.object_id, pm.parameter_id;
+";
+
+                await using (var cmd = connection.CreateCommand())
+                {
+                    cmd.CommandText = queryFuncParams;
+                    cmd.CommandTimeout = options.QueryTimeout;
+                    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var objId = reader.GetInt32(0);
+                        var paramId = reader.GetInt32(7);
+                        if (paramId == 0) continue; // Skip return value for scalar function
+
+                        if (funcMap.TryGetValue(objId, out var entry))
+                        {
+                            var paramName = reader.IsDBNull(1) ? "@param" : reader.GetString(1);
+                            var typeName = reader.GetString(2);
+                            var maxLen = reader.GetInt16(3);
+                            var precision = reader.GetByte(4);
+                            var scale = reader.GetByte(5);
+                            var isOutput = reader.GetBoolean(6);
+
+                            var formattedType = FormatDataType(typeName, maxLen, precision, scale);
+                            var paramStr = $"{paramName} {formattedType}{(isOutput ? " OUTPUT" : "")}";
+                            entry.Params.Add(paramStr);
+                        }
+                    }
+                }
+            }
+
+            var functions = funcMap.Values
+                .Select(f => new FunctionSchemaItem(f.Schema, f.Name, f.TypeDesc, f.Params, f.Def))
+                .ToList();
+
+            // 7. Scan Stored Procedures & Parameters & SQL Logic
             var procMap = new Dictionary<int, (string Schema, string Name, string? Def, List<string> Params)>();
             const string queryProcs = @"
 SELECT 
@@ -488,7 +747,7 @@ ORDER BY p.object_id, pm.parameter_id;
                 .Select(p => new ProcedureSchemaItem(p.Schema, p.Name, p.Params, p.Def))
                 .ToList();
 
-            Logger.Process("SCAN", $"Database '{dbName}' completed: {tables.Count} tables, {views.Count} views, {procs.Count} procedures.");
+            Logger.Process("SCAN", $"Database '{dbName}' completed: {tables.Count} tables, {views.Count} views, {procs.Count} procedures, {functions.Count} functions, {allTriggers.Count} triggers.");
 
             return new DatabaseScanReport(
                 DatabaseName: dbName,
@@ -498,7 +757,12 @@ ORDER BY p.object_id, pm.parameter_id;
                 ProcedureCount: procs.Count,
                 Tables: tables,
                 Views: views,
-                Procedures: procs
+                Procedures: procs,
+                ErrorMessage: null,
+                FunctionCount: functions.Count,
+                TriggerCount: allTriggers.Count,
+                Functions: functions,
+                Triggers: allTriggers
             );
         }
         catch (SqlException ex)

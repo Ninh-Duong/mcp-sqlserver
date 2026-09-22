@@ -66,19 +66,48 @@ Alternatively, ensure a valid `dbconfig.json` exists in the worker's working dir
 
 ## 4. MCP Tool Specifications & Calling Rules
 
-`mcp-sqlserver` exposes 5 specialized tools:
+`mcp-sqlserver` exposes 6 specialized tools:
 
 | Tool | Purpose | Required Inputs | Fail-Fast Behavior |
 |------|---------|-----------------|-------------------|
 | `test_connection` | Verify connectivity & retrieve SQL Server version | None | Returns `isError: true` with human-readable error if connection fails. |
 | `list_databases` | Enumerate accessible databases | None | Returns catalog listing and access flags. |
 | `list_tables` | List tables in a specific database | `database` (string) | Returns `isError: true` immediately if `database` is missing or empty. |
-| `scan_server_context` | Full server scan & AI Context export | None | Generates token-optimized markdown in `./ai-context/`. |
+| `scan_server_context` | Full server scan & AI Context export (Tables, Views, SPs, Functions, Triggers, Indexes) | None | Generates token-optimized markdown & SQL definitions in `./ai-context/`. |
+| `search_context` | Ultra-fast local in-memory search for tables, columns, routines (SPs, views, functions, triggers) without reading large files | `query` (string) | Returns matches with direct file links in ~50 tokens. |
 | `execute_query` | Execute safe, read-only SQL queries | `query` (string) | Rejects modifying keywords immediately with error before DB roundtrip. |
 
 ---
 
-### 4.1 Tool: `execute_query` (Critical Contract)
+### 4.1 Tool: `search_context` (Token Saver Tool)
+
+#### Rules & Usage:
+- **Zero Token Waste**: Searches local `./ai-context/` without reading large files into LLM context window.
+- **Parameters**:
+  - `query` (string, required): Keyword, table name, column, or routine name.
+  - `target` (string, optional): `'all'` (default), `'table'`, `'column'`, `'routine'`, `'procedure'`, `'view'`, `'function'`, `'trigger'`.
+  - `database` (string, optional): Filter by target database name.
+  - `limit` (integer, optional): Maximum matches to return (default: 20, max: 100).
+
+#### Example Request:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "search_context",
+    "arguments": {
+      "query": "NotificationCode",
+      "target": "column"
+    }
+  }
+}
+```
+
+---
+
+### 4.2 Tool: `execute_query` (Critical Contract)
 
 #### Rules & Constraints:
 - **Strictly Read-Only**: Only pure `SELECT` or CTEs (`WITH ... SELECT`) are permitted.
@@ -89,7 +118,7 @@ Alternatively, ensure a valid `dbconfig.json` exists in the worker's working dir
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
+  "id": 2,
   "method": "tools/call",
   "params": {
     "name": "execute_query",
@@ -106,7 +135,7 @@ Alternatively, ensure a valid `dbconfig.json` exists in the worker's working dir
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
+  "id": 2,
   "result": {
     "content": [
       {
@@ -126,24 +155,31 @@ Alternatively, ensure a valid `dbconfig.json` exists in the worker's working dir
 To minimize LLM token consumption and eliminate redundant round-trips:
 
 ```
-[ Master Agent Workflow ]
+[ Master Agent Troubleshooting Workflow ]
           │
           ├─► 1. Check if `./ai-context/INDEX.md` exists?
           │      ├─► NO  ──► Call `scan_server_context` once.
           │      └─► YES ──► Proceed to Step 2.
           │
-          ├─► 2. Read `./ai-context/servers/{ALIAS}/GLOBAL_TABLES_MAP.compact.md` directly.
-          │      (Locate exact Database, Schema, Table, PK/FK, and Column names in ~300 tokens)
+          ├─► 2. Locate target Database / Table / Column / Routine:
+          │      ├─► [RECOMMENDED] Call tool `search_context(query: "...")` (~50 tokens).
+          │      ├─► Or open `./servers/{ALIAS}/TABLES_ROUTER.compact.md` (~4,000 tokens).
+          │      └─► Or use `grep_search` on `GLOBAL_TABLES_MAP.compact.md`.
           │
-          ├─► 3. Need business logic?
-          │      Read specific `./ai-context/servers/{ALIAS}/databases/{DB}/views/{VIEW}.sql`
-          │      or `procedures/{SP}.sql` file directly.
+          ├─► 3. Inspect Schema & Constraints:
+          │      Open `./servers/{ALIAS}/databases/{DB}/schema.compact.md`
+          │      (Check column types, defaults, check constraints, PK, FK, and indexes).
           │
-          └─► 4. Need actual data inspection?
+          ├─► 4. Inspect Logic:
+          │      Read specific `./databases/{DB}/procedures/{SP}.sql`,
+          │      `functions/{FN}.sql`, `triggers/{TRG}.sql`, or `views/{VIEW}.sql`.
+          │
+          └─► 5. Need actual data inspection?
                  Call `execute_query` with a precise, indexed `WHERE` filter and `TOP N`.
 ```
 
 ### Agent Anti-Patterns (Do NOT Do This):
+- ❌ **NEVER** use `view_file` to read the entire `GLOBAL_TABLES_MAP.compact.md` (600KB+ ~150,000 tokens!). Use `search_context` tool instead.
 - ❌ **Do NOT** call `list_tables` or query `sys.columns` repeatedly if `./ai-context/` has already been generated.
 - ❌ **Do NOT** execute `SELECT * FROM BigTable` without a `WHERE` condition or `TOP` limit.
 - ❌ **Do NOT** send modifying SQL statements (`UPDATE`, `DELETE`, etc.)—they will fail immediately.
