@@ -195,24 +195,6 @@ public record DatabaseMigrationStatus(
     DateTime? LastObjectModifyDate
 );
 
-public record DatabaseDriftInfo(
-    string DatabaseName,
-    bool HasDrift,
-    string? SnapshotMigrationId,
-    string? CurrentMigrationId,
-    int SnapshotCount,
-    int CurrentCount,
-    string Reason
-);
-
-public record DriftCheckResult(
-    bool Success,
-    string ServerAlias,
-    IReadOnlyList<DatabaseDriftInfo> DriftedDatabases,
-    IReadOnlyList<DatabaseDriftInfo> UpToDateDatabases,
-    string? ErrorMessage = null
-);
-
 public record ServerScanResult(
     string ServerAlias,
     string ServerHost,
@@ -220,15 +202,4 @@ public record ServerScanResult(
     DateTime ScannedAt,
     long ElapsedMs,
     IReadOnlyList<DatabaseScanReport> Databases
-);
-
-public record QueryExecutionResult(
-    bool Success,
-    string Database,
-    int RowCount,
-    bool IsTruncated,
-    long ElapsedMs,
-    IReadOnlyList<string> Columns,
-    IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows,
-    string? ErrorMessage = null
 );
