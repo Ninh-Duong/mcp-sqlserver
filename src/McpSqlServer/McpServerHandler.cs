@@ -165,6 +165,11 @@ public class McpServerHandler
                                         ["type"] = "string",
                                         ["description"] = "Server or environment alias (e.g. DEV, UAT, PROD). Defaults to current configuration."
                                     },
+                                    ["database"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional single database to scan (targeted fast scan in ~2s). If omitted, scans all accessible databases."
+                                    },
                                     ["output_directory"] = new JsonObject
                                     {
                                         ["type"] = "string",
@@ -174,6 +179,23 @@ public class McpServerHandler
                                     {
                                         ["type"] = "boolean",
                                         ["description"] = "Whether to scan system databases (master, msdb, etc.) (default: false)."
+                                    }
+                                }
+                            }
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "check_schema_drift",
+                            ["description"] = "Check whether databases on SQL Server have newer EF Core migrations or DDL modifications compared to the cached ai-context snapshot.",
+                            ["inputSchema"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["base_directory"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Base directory of ai-context (default: ./ai-context)."
                                     }
                                 }
                             }
@@ -301,7 +323,11 @@ public class McpServerHandler
                         QueryTimeout = _options.QueryTimeout
                     };
 
-                    var scanResult = await _sqlService.ScanServerAsync(scanOptions, includeSystem: includeSystem, cancellationToken: cancellationToken);
+                    var targetDb = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("database", out var tdbProp)
+                        ? tdbProp.GetString()
+                        : null;
+
+                    var scanResult = await _sqlService.ScanServerAsync(scanOptions, includeSystem: includeSystem, targetDatabase: targetDb, cancellationToken: cancellationToken);
                     var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir ?? "./ai-context", cancellationToken);
 
                     var responseObj = new
@@ -317,6 +343,34 @@ public class McpServerHandler
 
                     var resultText = JsonSerializer.Serialize(responseObj, new JsonSerializerOptions { WriteIndented = true });
                     return CreateToolResponse(idNode, resultText, isError: false);
+                }
+                else if (toolName == "check_schema_drift")
+                {
+                    var args = paramsProp.TryGetProperty("arguments", out var argsProp) ? argsProp : default;
+                    var baseDir = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("base_directory", out var bProp)
+                        ? bProp.GetString()
+                        : "./ai-context";
+
+                    var fullBaseDir = Path.GetFullPath(baseDir ?? "./ai-context");
+                    var registryPath = Path.Combine(fullBaseDir, "servers_registry.json");
+                    IReadOnlyDictionary<string, DatabaseMigrationStatus>? cachedMigrations = null;
+
+                    if (File.Exists(registryPath))
+                    {
+                        try
+                        {
+                            var json = await File.ReadAllTextAsync(registryPath, cancellationToken);
+                            var items = JsonSerializer.Deserialize<List<ServerRegistryItem>>(json);
+                            var serverItem = items?.FirstOrDefault(i => i.ServerAlias.Equals(_options.ServerAlias, StringComparison.OrdinalIgnoreCase))
+                                             ?? items?.FirstOrDefault();
+                            cachedMigrations = serverItem?.Migrations;
+                        }
+                        catch { }
+                    }
+
+                    var driftResult = await _sqlService.CheckSchemaDriftAsync(_options, cachedMigrations, cancellationToken);
+                    var resultText = JsonSerializer.Serialize(driftResult, new JsonSerializerOptions { WriteIndented = true });
+                    return CreateToolResponse(idNode, resultText, isError: !driftResult.Success);
                 }
                 else if (toolName == "execute_query")
                 {

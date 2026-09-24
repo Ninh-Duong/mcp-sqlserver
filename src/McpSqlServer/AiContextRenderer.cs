@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace McpSqlServer;
 
@@ -13,7 +14,8 @@ public record ServerRegistryItem(
     int TotalProcedureCount,
     DateTime LastScannedAt,
     int TotalFunctionCount = 0,
-    int TotalTriggerCount = 0
+    int TotalTriggerCount = 0,
+    IReadOnlyDictionary<string, DatabaseMigrationStatus>? Migrations = null
 );
 
 public record SearchContextMatch(
@@ -46,76 +48,33 @@ public class AiContextRenderer
 
         Directory.CreateDirectory(serverDir);
 
-        int totalTables = 0;
-        int totalViews = 0;
-        int totalProcedures = 0;
-        int totalFunctions = 0;
-        int totalTriggers = 0;
+        // Delete legacy monolithic GLOBAL_TABLES_MAP.compact.md to eliminate token trap
+        var legacyGlobalMap = Path.Combine(serverDir, "GLOBAL_TABLES_MAP.compact.md");
+        if (File.Exists(legacyGlobalMap))
+        {
+            try { File.Delete(legacyGlobalMap); } catch { }
+        }
 
-        // 1. Render Global Tables Map (with Critical Token Safety Warning)
-        var globalMapSb = new StringBuilder();
-        globalMapSb.AppendLine($"# Global Tables Map: {scanResult.ServerAlias}");
-        globalMapSb.AppendLine();
-        globalMapSb.AppendLine($"> ⚠️ CRITICAL AGENT INSTRUCTION: This file is large (~600KB+). NEVER use view_file to load the entire document.");
-        globalMapSb.AppendLine($"> ALWAYS use grep_search to find specific columns/tables, or call MCP tool `search_context(query)` for instant ~50-token answers.");
-        globalMapSb.AppendLine($"> Single-line index per table for reverse lookup on Server [{scanResult.ServerAlias}].");
-        globalMapSb.AppendLine($"> Last updated: {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
-        globalMapSb.AppendLine();
+        // 1. Export schema files, views, procedures, functions, triggers
+        int scanTotalTables = 0;
+        int scanTotalViews = 0;
+        int scanTotalProcedures = 0;
+        int scanTotalFunctions = 0;
+        int scanTotalTriggers = 0;
 
-        // 2. Render Fast Skeleton Router (Two-Tier Index for ultra-low token lookup ~20KB)
-        var tableRouterSb = new StringBuilder();
-        tableRouterSb.AppendLine($"# Database Tables Router: {scanResult.ServerAlias}");
-        tableRouterSb.AppendLine();
-        tableRouterSb.AppendLine($"> Ultra-compact skeleton index (~20KB) for low-token database routing. Avoid reading entire global map.");
-        tableRouterSb.AppendLine($"> Flow: Locate database for table -> Open './databases/{{DB}}/schema.compact.md'.");
-        tableRouterSb.AppendLine($"> Last updated: {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
-        tableRouterSb.AppendLine();
-
-        var dbSummaries = new StringBuilder();
-        dbSummaries.AppendLine($"# Server Overview: {scanResult.ServerAlias}");
-        dbSummaries.AppendLine();
-        dbSummaries.AppendLine($"- **Host:** `{scanResult.ServerHost}`");
-        dbSummaries.AppendLine($"- **SQL Version:** {scanResult.ServerVersion}");
-        dbSummaries.AppendLine($"- **Scan Time:** {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
-        dbSummaries.AppendLine($"- **Execution Duration:** {scanResult.ElapsedMs} ms");
-        dbSummaries.AppendLine($"- **Total Databases:** {scanResult.Databases.Count}");
-        dbSummaries.AppendLine($"- **Fast Router Map (~20KB):** [TABLES_ROUTER.compact.md](./TABLES_ROUTER.compact.md) (Ultra-low token table lookup)");
-        dbSummaries.AppendLine($"- **Detailed Columns Map (~600KB):** [GLOBAL_TABLES_MAP.compact.md](./GLOBAL_TABLES_MAP.compact.md) (Grep only!)");
-        dbSummaries.AppendLine();
-        dbSummaries.AppendLine("## Databases Overview");
-        dbSummaries.AppendLine();
-        dbSummaries.AppendLine("| Database | Status | Tables | Views | Procedures | Functions | Triggers | Schema Compact Link |");
-        dbSummaries.AppendLine("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---|");
+        var scannedDbNames = new HashSet<string>(scanResult.Databases.Select(d => d.DatabaseName), StringComparer.OrdinalIgnoreCase);
 
         foreach (var db in scanResult.Databases)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            totalTables += db.TableCount;
-            totalViews += db.ViewCount;
-            totalProcedures += db.ProcedureCount;
-            totalFunctions += db.FunctionCount;
-            totalTriggers += db.TriggerCount;
-
-            var status = db.Success ? "Success" : "Failed";
-            var schemaLink = db.Success ? $"[databases/{db.DatabaseName}/schema.compact.md](./databases/{db.DatabaseName}/schema.compact.md)" : $"*(Error: {db.ErrorMessage})*";
-            dbSummaries.AppendLine($"| **{db.DatabaseName}** | {status} | {db.TableCount} | {db.ViewCount} | {db.ProcedureCount} | {db.FunctionCount} | {db.TriggerCount} | {schemaLink} |");
+            scanTotalTables += db.TableCount;
+            scanTotalViews += db.ViewCount;
+            scanTotalProcedures += db.ProcedureCount;
+            scanTotalFunctions += db.FunctionCount;
+            scanTotalTriggers += db.TriggerCount;
 
             if (!db.Success) continue;
-
-            // Add to Fast Router (skeleton table names only)
-            if (db.Tables.Count > 0)
-            {
-                var tableNames = string.Join(", ", db.Tables.Select(t => t.Name));
-                tableRouterSb.AppendLine($"- **`{db.DatabaseName}`**: {tableNames}");
-            }
-
-            // Add to Global Tables Map (with columns, PK, FK)
-            foreach (var table in db.Tables)
-            {
-                var colsStr = string.Join(", ", table.Columns.Select(c => c.ToQuickMapString()));
-                globalMapSb.AppendLine($"- `{db.DatabaseName}.{table.FullName}`: {colsStr}");
-            }
 
             var dbDir = Path.Combine(serverDir, "databases", db.DatabaseName);
             var viewsDir = Path.Combine(dbDir, "views");
@@ -194,33 +153,164 @@ public class AiContextRenderer
             }
         }
 
-        // Write servers/{ServerAlias}/TABLES_ROUTER.compact.md
+        // 2. Update SQLite Catalog (catalog.db with FTS5)
+        var catalogDbPath = await UpdateCatalogDbAsync(baseDir, scanResult.ServerAlias, scanResult.Databases, cancellationToken);
+        createdFiles.Add(catalogDbPath);
+
+        // Clean up legacy GLOBAL_TABLES_MAP.compact.md if present
+        var legacyMapPath = Path.Combine(serverDir, "GLOBAL_TABLES_MAP.compact.md");
+        if (File.Exists(legacyMapPath))
+        {
+            try { File.Delete(legacyMapPath); } catch { }
+        }
+
+        // 3. Write / Merge TABLES_ROUTER.compact.md
         var routerPath = Path.Combine(serverDir, "TABLES_ROUTER.compact.md");
-        await File.WriteAllTextAsync(routerPath, tableRouterSb.ToString(), Encoding.UTF8, cancellationToken);
+        var existingRouterLines = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(routerPath))
+        {
+            var lines = await File.ReadAllLinesAsync(routerPath, cancellationToken);
+            foreach (var l in lines)
+            {
+                if (l.StartsWith("- **`") && l.Contains("`**:"))
+                {
+                    var closeIdx = l.IndexOf("`**:");
+                    var db = l.Substring(5, closeIdx - 5);
+                    existingRouterLines[db] = l;
+                }
+            }
+        }
+
+        foreach (var db in scanResult.Databases.Where(d => d.Success && d.Tables.Count > 0))
+        {
+            var tableNames = string.Join(", ", db.Tables.Select(t => t.Name));
+            existingRouterLines[db.DatabaseName] = $"- **`{db.DatabaseName}`**: {tableNames}";
+        }
+
+        var routerSb = new StringBuilder();
+        routerSb.AppendLine($"# Database Tables Router: {scanResult.ServerAlias}");
+        routerSb.AppendLine();
+        routerSb.AppendLine($"> Ultra-compact skeleton index (~20KB) for low-token database routing.");
+        routerSb.AppendLine($"> Flow: Locate database for table -> Open './databases/{{DB}}/schema.compact.md'.");
+        routerSb.AppendLine($"> Fast Search: Call MCP tool `search_context(query: \"...\")` (<1ms via SQLite).");
+        routerSb.AppendLine($"> Last updated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        routerSb.AppendLine();
+        foreach (var kv in existingRouterLines.OrderBy(k => k.Key))
+        {
+            routerSb.AppendLine(kv.Value);
+        }
+        await File.WriteAllTextAsync(routerPath, routerSb.ToString(), Encoding.UTF8, cancellationToken);
         createdFiles.Add(routerPath);
 
-        // Write servers/{ServerAlias}/GLOBAL_TABLES_MAP.compact.md
-        var globalMapPath = Path.Combine(serverDir, "GLOBAL_TABLES_MAP.compact.md");
-        await File.WriteAllTextAsync(globalMapPath, globalMapSb.ToString(), Encoding.UTF8, cancellationToken);
-        createdFiles.Add(globalMapPath);
+        // 4. Write Cross-Database Dependencies Map
+        var crossDbSb = new StringBuilder();
+        crossDbSb.AppendLine($"# Cross-Database Dependencies Map: {scanResult.ServerAlias}");
+        crossDbSb.AppendLine();
+        crossDbSb.AppendLine("> Inter-database references found in stored procedures, views, and functions.");
+        crossDbSb.AppendLine($"> Last updated: {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
+        crossDbSb.AppendLine();
 
-        // Write servers/{ServerAlias}/summary.md
-        var serverSummaryPath = Path.Combine(serverDir, "summary.md");
-        await File.WriteAllTextAsync(serverSummaryPath, dbSummaries.ToString(), Encoding.UTF8, cancellationToken);
-        createdFiles.Add(serverSummaryPath);
+        var hasCrossDb = false;
+        foreach (var db in scanResult.Databases.Where(d => d.CrossDbDependencies.Count > 0))
+        {
+            hasCrossDb = true;
+            crossDbSb.AppendLine($"## Database `{db.DatabaseName}`");
+            var grouped = db.CrossDbDependencies.GroupBy(d => d.ReferencedDatabase, StringComparer.OrdinalIgnoreCase);
+            foreach (var grp in grouped)
+            {
+                crossDbSb.AppendLine($"- References **`{grp.Key}`**:");
+                foreach (var item in grp)
+                {
+                    crossDbSb.AppendLine($"  - `{db.DatabaseName}.{item.ReferencingEntity}` -> `{grp.Key}.{item.ReferencedEntity}`");
+                }
+            }
+            crossDbSb.AppendLine();
+        }
+        if (!hasCrossDb)
+        {
+            crossDbSb.AppendLine("*(No cross-database dependencies detected)*");
+            crossDbSb.AppendLine();
+        }
 
-        // 3. Update Registry & Master INDEX.md
+        var crossDbPath = Path.Combine(serverDir, "CROSS_DB_DEPENDENCIES.compact.md");
+        await File.WriteAllTextAsync(crossDbPath, crossDbSb.ToString(), Encoding.UTF8, cancellationToken);
+        createdFiles.Add(crossDbPath);
+
+        // 5. Write / Merge Server Overview summary.md
+        var summaryPath = Path.Combine(serverDir, "summary.md");
+        var existingSummaryRows = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(summaryPath))
+        {
+            var lines = await File.ReadAllLinesAsync(summaryPath, cancellationToken);
+            foreach (var l in lines)
+            {
+                if (l.StartsWith("| **") && l.Contains("** |"))
+                {
+                    var endIdx = l.IndexOf("** |");
+                    var db = l.Substring(4, endIdx - 4);
+                    existingSummaryRows[db] = l;
+                }
+            }
+        }
+
+        foreach (var db in scanResult.Databases)
+        {
+            var status = db.Success ? "Success" : "Failed";
+            var schemaLink = db.Success ? $"[databases/{db.DatabaseName}/schema.compact.md](./databases/{db.DatabaseName}/schema.compact.md)" : $"*(Error: {db.ErrorMessage})*";
+            existingSummaryRows[db.DatabaseName] = $"| **{db.DatabaseName}** | {status} | {db.TableCount} | {db.ViewCount} | {db.ProcedureCount} | {db.FunctionCount} | {db.TriggerCount} | {schemaLink} |";
+        }
+
+        var summarySb = new StringBuilder();
+        summarySb.AppendLine($"# Server Overview: {scanResult.ServerAlias}");
+        summarySb.AppendLine();
+        summarySb.AppendLine($"- **Host:** `{scanResult.ServerHost}`");
+        summarySb.AppendLine($"- **SQL Version:** {scanResult.ServerVersion}");
+        summarySb.AppendLine($"- **Scan Time:** {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
+        summarySb.AppendLine($"- **Execution Duration:** {scanResult.ElapsedMs} ms");
+        summarySb.AppendLine($"- **Total Databases:** {existingSummaryRows.Count}");
+        summarySb.AppendLine($"- **Fast Router Map (~20KB):** [TABLES_ROUTER.compact.md](./TABLES_ROUTER.compact.md)");
+        summarySb.AppendLine($"- **Cross-DB Dependencies:** [CROSS_DB_DEPENDENCIES.compact.md](./CROSS_DB_DEPENDENCIES.compact.md)");
+        summarySb.AppendLine($"- **SQLite Catalog (FTS5):** `../../catalog.db` (Searched instantly via tool `search_context`)");
+        summarySb.AppendLine();
+        summarySb.AppendLine("## Databases Overview");
+        summarySb.AppendLine();
+        summarySb.AppendLine("| Database | Status | Tables | Views | Procedures | Functions | Triggers | Schema Compact Link |");
+        summarySb.AppendLine("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---|");
+        foreach (var kv in existingSummaryRows.OrderBy(k => k.Key))
+        {
+            summarySb.AppendLine(kv.Value);
+        }
+
+        await File.WriteAllTextAsync(summaryPath, summarySb.ToString(), Encoding.UTF8, cancellationToken);
+        createdFiles.Add(summaryPath);
+
+        // 6. Update Registry & Master INDEX.md
+        var migrationsMap = new Dictionary<string, DatabaseMigrationStatus>(StringComparer.OrdinalIgnoreCase);
+        foreach (var db in scanResult.Databases)
+        {
+            if (db.Success)
+            {
+                migrationsMap[db.DatabaseName] = new DatabaseMigrationStatus(
+                    db.DatabaseName,
+                    db.LatestMigrationId,
+                    db.MigrationCount,
+                    db.LastObjectModifyDate
+                );
+            }
+        }
+
         var registryItem = new ServerRegistryItem(
             ServerAlias: scanResult.ServerAlias,
             ServerHost: scanResult.ServerHost,
             ServerVersion: scanResult.ServerVersion,
-            DatabaseCount: scanResult.Databases.Count,
-            TotalTableCount: totalTables,
-            TotalViewCount: totalViews,
-            TotalProcedureCount: totalProcedures,
+            DatabaseCount: existingSummaryRows.Count,
+            TotalTableCount: scanTotalTables,
+            TotalViewCount: scanTotalViews,
+            TotalProcedureCount: scanTotalProcedures,
             LastScannedAt: scanResult.ScannedAt,
-            TotalFunctionCount: totalFunctions,
-            TotalTriggerCount: totalTriggers
+            TotalFunctionCount: scanTotalFunctions,
+            TotalTriggerCount: scanTotalTriggers,
+            Migrations: migrationsMap
         );
 
         var indexPath = await UpdateMasterIndexAsync(baseDir, registryItem, cancellationToken);
@@ -229,12 +319,203 @@ public class AiContextRenderer
         return createdFiles;
     }
 
+    public static async Task<string> UpdateCatalogDbAsync(
+        string baseDir,
+        string serverAlias,
+        IEnumerable<DatabaseScanReport> databases,
+        CancellationToken cancellationToken = default)
+    {
+        var dbPath = Path.Combine(baseDir, "catalog.db");
+        await using var conn = new SqliteConnection($"Data Source={dbPath}");
+        await conn.OpenAsync(cancellationToken);
+
+        const string initSql = @"
+CREATE TABLE IF NOT EXISTS catalog_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_alias TEXT NOT NULL,
+    database_name TEXT NOT NULL,
+    item_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    details TEXT,
+    relative_path TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cat_alias_db ON catalog_items(server_alias, database_name);
+CREATE INDEX IF NOT EXISTS idx_cat_type ON catalog_items(item_type);
+CREATE INDEX IF NOT EXISTS idx_cat_name ON catalog_items(name);
+";
+        await using (var initCmd = conn.CreateCommand())
+        {
+            initCmd.CommandText = initSql;
+            await initCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        try
+        {
+            const string ftsSql = @"
+CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts USING fts5(
+    name,
+    details,
+    content='catalog_items',
+    content_rowid='id'
+);";
+            await using var ftsCmd = conn.CreateCommand();
+            ftsCmd.CommandText = ftsSql;
+            await ftsCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch
+        {
+            // FTS5 optional fallback
+        }
+
+        await using var transaction = conn.BeginTransaction();
+
+        foreach (var db in databases)
+        {
+            if (!db.Success) continue;
+
+            // Delete old items for this server & DB
+            await using (var delCmd = conn.CreateCommand())
+            {
+                delCmd.Transaction = transaction;
+                delCmd.CommandText = "DELETE FROM catalog_items WHERE server_alias = @alias AND database_name = @db;";
+                delCmd.Parameters.AddWithValue("@alias", serverAlias);
+                delCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                await delCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Insert tables & columns
+            foreach (var t in db.Tables)
+            {
+                var colsSummary = string.Join(", ", t.Columns.Select(c => c.ToQuickMapString()));
+                var volInfo = t.ApproxRowCount.HasValue ? $" (~{t.ApproxRowCount.Value} rows)" : "";
+
+                await using (var insCmd = conn.CreateCommand())
+                {
+                    insCmd.Transaction = transaction;
+                    insCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'table', @name, @details, @path);";
+                    insCmd.Parameters.AddWithValue("@alias", serverAlias);
+                    insCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                    insCmd.Parameters.AddWithValue("@name", t.FullName);
+                    insCmd.Parameters.AddWithValue("@details", $"{colsSummary}{volInfo}");
+                    insCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
+                    await insCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                foreach (var col in t.Columns)
+                {
+                    await using var insColCmd = conn.CreateCommand();
+                    insColCmd.Transaction = transaction;
+                    insColCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'column', @name, @details, @path);";
+                    insColCmd.Parameters.AddWithValue("@alias", serverAlias);
+                    insColCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                    insColCmd.Parameters.AddWithValue("@name", $"{t.FullName}.{col.Name}");
+                    var sampleStr = col.SampleValues != null && col.SampleValues.Count > 0 ? $" | Values: [{string.Join(", ", col.SampleValues)}]" : "";
+                    insColCmd.Parameters.AddWithValue("@details", $"{col.DataType} ({(col.IsPrimaryKey ? "PK, " : "")}{(col.IsNullable ? "Null" : "Not Null")}){sampleStr}");
+                    insColCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
+                    await insColCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
+            // Insert views
+            foreach (var v in db.Views)
+            {
+                var fileName = SanitizeFileName($"{v.Schema}.{v.Name}.sql");
+                await using var insViewCmd = conn.CreateCommand();
+                insViewCmd.Transaction = transaction;
+                insViewCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'view', @name, @details, @path);";
+                insViewCmd.Parameters.AddWithValue("@alias", serverAlias);
+                insViewCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                insViewCmd.Parameters.AddWithValue("@name", v.FullName);
+                insViewCmd.Parameters.AddWithValue("@details", $"View in {db.DatabaseName}");
+                insViewCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/views/{fileName}");
+                await insViewCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Insert procedures
+            foreach (var p in db.Procedures)
+            {
+                var fileName = SanitizeFileName($"{p.Schema}.{p.Name}.sql");
+                var paramsStr = p.Parameters.Count > 0 ? string.Join(", ", p.Parameters) : "No params";
+                await using var insProcCmd = conn.CreateCommand();
+                insProcCmd.Transaction = transaction;
+                insProcCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'procedure', @name, @details, @path);";
+                insProcCmd.Parameters.AddWithValue("@alias", serverAlias);
+                insProcCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                insProcCmd.Parameters.AddWithValue("@name", p.FullName);
+                insProcCmd.Parameters.AddWithValue("@details", paramsStr);
+                insProcCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/procedures/{fileName}");
+                await insProcCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Insert functions
+            foreach (var f in db.Functions)
+            {
+                var fileName = SanitizeFileName($"{f.Schema}.{f.Name}.sql");
+                await using var insFuncCmd = conn.CreateCommand();
+                insFuncCmd.Transaction = transaction;
+                insFuncCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'function', @name, @details, @path);";
+                insFuncCmd.Parameters.AddWithValue("@alias", serverAlias);
+                insFuncCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                insFuncCmd.Parameters.AddWithValue("@name", f.FullName);
+                insFuncCmd.Parameters.AddWithValue("@details", f.TypeDesc);
+                insFuncCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/functions/{fileName}");
+                await insFuncCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Insert triggers
+            foreach (var trg in db.Triggers)
+            {
+                var fileName = SanitizeFileName($"{trg.Schema}.{trg.Name}.sql");
+                await using var insTrgCmd = conn.CreateCommand();
+                insTrgCmd.Transaction = transaction;
+                insTrgCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'trigger', @name, @details, @path);";
+                insTrgCmd.Parameters.AddWithValue("@alias", serverAlias);
+                insTrgCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                insTrgCmd.Parameters.AddWithValue("@name", trg.FullName);
+                insTrgCmd.Parameters.AddWithValue("@details", $"Trigger on [{trg.TargetTable}] ({trg.Events})");
+                insTrgCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/triggers/{fileName}");
+                await insTrgCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        try
+        {
+            await using var syncFts = conn.CreateCommand();
+            syncFts.Transaction = transaction;
+            syncFts.CommandText = "INSERT INTO catalog_fts(catalog_fts) VALUES('rebuild');";
+            await syncFts.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch
+        {
+            // Ignore if rebuild command unsupported
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return dbPath;
+    }
+
     public static string RenderCompactSchema(string serverAlias, DatabaseScanReport db)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"# Database Schema: {db.DatabaseName} (Server: {serverAlias})");
         sb.AppendLine();
         sb.AppendLine($"> Statistics: **{db.TableCount}** Tables | **{db.ViewCount}** Views | **{db.ProcedureCount}** Stored Procedures | **{db.FunctionCount}** Functions | **{db.TriggerCount}** Triggers");
+        if (!string.IsNullOrEmpty(db.LatestMigrationId))
+        {
+            sb.AppendLine($"> Migration: Latest = `{db.LatestMigrationId}` ({db.MigrationCount} total)");
+        }
         sb.AppendLine("> Token-optimized compact format for AI Agent schema lookup.");
         sb.AppendLine();
 
@@ -248,7 +529,23 @@ public class AiContextRenderer
         {
             foreach (var table in db.Tables)
             {
-                sb.AppendLine($"### {table.FullName}");
+                var volSuffix = "";
+                if (table.ApproxRowCount.HasValue)
+                {
+                    var r = table.ApproxRowCount.Value;
+                    var rStr = r >= 1_000_000
+                        ? (r / 1_000_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "M"
+                        : r >= 1_000
+                            ? (r / 1_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "K"
+                            : $"{r}";
+                    var sStr = table.ApproxSizeMb.HasValue
+                        ? $" | {table.ApproxSizeMb.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} MB"
+                        : "";
+                    var highVol = r >= 100_000 ? " [HIGH VOLUME]" : "";
+                    volSuffix = $" (~{rStr} rows{sStr}){highVol}";
+                }
+
+                sb.AppendLine($"### {table.FullName}{volSuffix}");
                 foreach (var col in table.Columns)
                 {
                     sb.AppendLine(col.ToCompactString());
@@ -303,8 +600,8 @@ public class AiContextRenderer
             foreach (var proc in db.Procedures)
             {
                 var procFile = SanitizeFileName($"{proc.Schema}.{proc.Name}.sql");
-                var paramList = proc.Parameters.Count > 0 ? $"({string.Join(", ", proc.Parameters)})" : "()";
-                sb.AppendLine($"- **`{proc.FullName}`** `{paramList}` -> [View SQL definition](./procedures/{procFile})");
+                var paramStr = proc.Parameters.Count > 0 ? $"({string.Join(", ", proc.Parameters.Take(3))}{(proc.Parameters.Count > 3 ? ", ..." : "")})" : "()";
+                sb.AppendLine($"- **`{proc.FullName}`** `{paramStr}` -> [Procedure SQL definition](./procedures/{procFile})");
             }
         }
         sb.AppendLine();
@@ -313,15 +610,15 @@ public class AiContextRenderer
         sb.AppendLine();
         if (db.Functions.Count == 0)
         {
-            sb.AppendLine("*(No user-defined functions found)*");
+            sb.AppendLine("*(No functions found)*");
         }
         else
         {
             foreach (var func in db.Functions)
             {
                 var funcFile = SanitizeFileName($"{func.Schema}.{func.Name}.sql");
-                var paramList = func.Parameters.Count > 0 ? $"({string.Join(", ", func.Parameters)})" : "()";
-                sb.AppendLine($"- **`{func.FullName}`** `{paramList}` ({func.TypeDesc}) -> [View SQL definition](./functions/{funcFile})");
+                var paramStr = func.Parameters.Count > 0 ? $"({string.Join(", ", func.Parameters)})" : "()";
+                sb.AppendLine($"- **`{func.FullName}`** `{paramStr}` ({func.TypeDesc}) -> [Function SQL definition](./functions/{funcFile})");
             }
         }
         sb.AppendLine();
@@ -373,6 +670,20 @@ public class AiContextRenderer
             }
         }
 
+        // Merge migrations if existing item has older entries
+        if (registry.TryGetValue(newItem.ServerAlias, out var existingItem) && existingItem.Migrations != null)
+        {
+            var merged = new Dictionary<string, DatabaseMigrationStatus>(existingItem.Migrations, StringComparer.OrdinalIgnoreCase);
+            if (newItem.Migrations != null)
+            {
+                foreach (var kv in newItem.Migrations)
+                {
+                    merged[kv.Key] = kv.Value;
+                }
+            }
+            newItem = newItem with { Migrations = merged };
+        }
+
         registry[newItem.ServerAlias] = newItem;
 
         var orderedItems = registry.Values.OrderBy(x => x.ServerAlias).ToList();
@@ -403,14 +714,15 @@ public class AiContextRenderer
         indexSb.AppendLine();
         indexSb.AppendLine("## 2. Token-Optimized AI Agent Debug & Troubleshooting Workflow");
         indexSb.AppendLine();
-        indexSb.AppendLine("> 💡 **CRITICAL TOKEN RULE**: Do NOT load large map files into LLM context window.");
+        indexSb.AppendLine("> 💡 **CRITICAL TOKEN RULE**: Zero Token Waste. High-speed lookup via SQLite catalog.");
         indexSb.AppendLine();
-        indexSb.AppendLine("1. **Instant Search (50 tokens):** Call MCP tool `search_context(query: \"...\")` to locate exact DB, Table, Column, Procedure, Function, or Trigger.");
-        indexSb.AppendLine("2. **Low-Token Table Routing (4,000 tokens):** If searching manually, open `./servers/{ALIAS}/TABLES_ROUTER.compact.md` (~20KB) to find the hosting database.");
-        indexSb.AppendLine("3. **Inspect Compact Schema:** Open `./servers/{ALIAS}/databases/{DB_NAME}/schema.compact.md` for column data types, defaults, check constraints, PK, FK, and indexes.");
+        indexSb.AppendLine("1. **Instant Search (<1ms, ~50 tokens):** Call MCP tool `search_context(query: \"...\")` to locate exact DB, Table, Column, Procedure, Function, or Trigger from local SQLite `catalog.db`.");
+        indexSb.AppendLine("2. **Low-Token Table Routing (~4,000 tokens):** If searching manually, open `./servers/{ALIAS}/TABLES_ROUTER.compact.md` (~20KB) to find the hosting database.");
+        indexSb.AppendLine("3. **Inspect Compact Schema:** Open `./servers/{ALIAS}/databases/{DB_NAME}/schema.compact.md` for column types, volume stats (~rows/MB), defaults, constraints, PK, FK, and indexes.");
         indexSb.AppendLine("4. **Inspect Routine Logic:** Open targeted SQL files in `views/`, `procedures/`, `functions/`, or `triggers/`.");
-        indexSb.AppendLine("5. **Query Live Data:** Call MCP tool `execute_query` with a read-only SELECT query to inspect real rows causing the bug.");
-        indexSb.AppendLine("6. **Compare Environments:** Compare `schema.compact.md` between DEV and PROD to detect schema drift.");
+        indexSb.AppendLine("5. **Inspect Cross-DB Relations:** Check `./servers/{ALIAS}/CROSS_DB_DEPENDENCIES.compact.md` for inter-database references.");
+        indexSb.AppendLine("6. **Detect Drift / Migrations:** Call MCP tool `check_schema_drift` or use CLI option `[3] Check DB Migration Drift`.");
+        indexSb.AppendLine("7. **Query Live Data:** Call MCP tool `execute_query` with a read-only SELECT query to inspect real rows.");
 
         var masterIndexPath = Path.Combine(baseDir, "INDEX.md");
         await File.WriteAllTextAsync(masterIndexPath, indexSb.ToString(), Encoding.UTF8, cancellationToken);
@@ -432,138 +744,69 @@ public class AiContextRenderer
         }
 
         var fullBaseDir = Path.GetFullPath(baseDirectory);
-        var serversDir = Path.Combine(fullBaseDir, "servers");
-        if (!Directory.Exists(serversDir))
+        var catalogPath = Path.Combine(fullBaseDir, "catalog.db");
+        if (!File.Exists(catalogPath))
         {
-            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "No ai-context found. Please run 'scan_server_context' tool first.");
+            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "No ai-context catalog found. Please run 'scan_server_context' tool first.");
         }
 
         var q = query.Trim();
         var targetType = string.IsNullOrWhiteSpace(target) ? "all" : target.Trim().ToLowerInvariant();
         var matches = new List<SearchContextMatch>();
 
-        foreach (var serverPath in Directory.GetDirectories(serversDir))
+        try
         {
-            var serverAlias = Path.GetFileName(serverPath);
+            await using var conn = new SqliteConnection($"Data Source={catalogPath}");
+            await conn.OpenAsync(cancellationToken);
 
-            // 1. Search Global Tables Map
-            var globalMapFile = Path.Combine(serverPath, "GLOBAL_TABLES_MAP.compact.md");
-            if (File.Exists(globalMapFile) && (targetType == "all" || targetType == "table" || targetType == "column"))
+            var querySql = @"
+SELECT server_alias, database_name, item_type, name, details, relative_path
+FROM catalog_items
+WHERE (@db IS NULL OR database_name = @db COLLATE NOCASE)
+  AND (
+    @type = 'all' 
+    OR item_type = @type 
+    OR (@type = 'routine' AND item_type IN ('procedure', 'view', 'function', 'trigger'))
+  )
+  AND (name LIKE @pattern ESCAPE '\' OR details LIKE @pattern ESCAPE '\')
+ORDER BY 
+  CASE WHEN name = @exact COLLATE NOCASE THEN 1
+       WHEN name LIKE @prefix COLLATE NOCASE THEN 2
+       ELSE 3 END,
+  item_type, name
+LIMIT @limit;";
+
+            var escapedQ = q.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
+            var pattern = $"%{escapedQ}%";
+            var prefix = $"{escapedQ}%";
+
+            await using (var cmd = conn.CreateCommand())
             {
-                using var reader = new StreamReader(globalMapFile, Encoding.UTF8);
-                string? line;
-                while ((line = await reader.ReadLineAsync(cancellationToken)) != null && matches.Count < limit)
+                cmd.CommandText = querySql;
+                cmd.Parameters.AddWithValue("@db", (object?)database ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@type", targetType);
+                cmd.Parameters.AddWithValue("@pattern", pattern);
+                cmd.Parameters.AddWithValue("@prefix", prefix);
+                cmd.Parameters.AddWithValue("@exact", q);
+                cmd.Parameters.AddWithValue("@limit", Math.Clamp(limit, 1, 100));
+
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    if (!line.StartsWith("- `")) continue;
-
-                    // Format: - `DB.Schema.Table`: Col1(PK), Col2...
-                    var colonIdx = line.IndexOf("`:");
-                    if (colonIdx < 0) continue;
-
-                    var tablePart = line.Substring(3, colonIdx - 3); // DB.Schema.Table
-                    var colsPart = line.Substring(colonIdx + 2).Trim();
-
-                    var dot1 = tablePart.IndexOf('.');
-                    if (dot1 < 0) continue;
-                    var dbName = tablePart[..dot1];
-                    var fullTableName = tablePart[(dot1 + 1)..];
-
-                    if (!string.IsNullOrEmpty(database) && !dbName.Equals(database, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    // Check table name match
-                    var isTableMatch = fullTableName.Contains(q, StringComparison.OrdinalIgnoreCase);
-                    if (isTableMatch && (targetType == "all" || targetType == "table"))
-                    {
-                        matches.Add(new SearchContextMatch(
-                            ServerAlias: serverAlias,
-                            Database: dbName,
-                            Type: "table",
-                            Name: fullTableName,
-                            Details: colsPart.Length > 120 ? colsPart[..117] + "..." : colsPart,
-                            RelativePath: $"servers/{serverAlias}/databases/{dbName}/schema.compact.md"
-                        ));
-                        if (matches.Count >= limit) break;
-                    }
-
-                    // Check column match
-                    if (targetType == "all" || targetType == "column")
-                    {
-                        var cols = colsPart.Split(',');
-                        foreach (var rawCol in cols)
-                        {
-                            var colTrim = rawCol.Trim();
-                            if (colTrim.Contains(q, StringComparison.OrdinalIgnoreCase))
-                            {
-                                matches.Add(new SearchContextMatch(
-                                    ServerAlias: serverAlias,
-                                    Database: dbName,
-                                    Type: "column",
-                                    Name: $"{fullTableName}.{colTrim}",
-                                    Details: $"Table {fullTableName} contains column '{colTrim}'",
-                                    RelativePath: $"servers/{serverAlias}/databases/{dbName}/schema.compact.md"
-                                ));
-                                if (matches.Count >= limit) break;
-                            }
-                        }
-                    }
+                    matches.Add(new SearchContextMatch(
+                        ServerAlias: reader.GetString(0),
+                        Database: reader.GetString(1),
+                        Type: reader.GetString(2),
+                        Name: reader.GetString(3),
+                        Details: reader.IsDBNull(4) ? "" : reader.GetString(4),
+                        RelativePath: reader.GetString(5)
+                    ));
                 }
             }
-
-            // 2. Search Routines (Views, Procedures, Functions, Triggers)
-            var dbsDir = Path.Combine(serverPath, "databases");
-            if (Directory.Exists(dbsDir) && (targetType == "all" || targetType == "routine" || targetType == "procedure" || targetType == "view" || targetType == "function" || targetType == "trigger"))
-            {
-                var targetDbDirs = string.IsNullOrEmpty(database)
-                    ? Directory.GetDirectories(dbsDir)
-                    : Directory.GetDirectories(dbsDir).Where(d => Path.GetFileName(d).Equals(database, StringComparison.OrdinalIgnoreCase));
-
-                foreach (var dbPath in targetDbDirs)
-                {
-                    if (matches.Count >= limit) break;
-                    var dbName = Path.GetFileName(dbPath);
-
-                    var routineSubfolders = new[]
-                    {
-                        ("procedures", "procedure"),
-                        ("views", "view"),
-                        ("functions", "function"),
-                        ("triggers", "trigger")
-                    };
-
-                    foreach (var (folder, type) in routineSubfolders)
-                    {
-                        if (matches.Count >= limit) break;
-                        if (targetType != "all" && targetType != "routine" && targetType != type) continue;
-
-                        var folderPath = Path.Combine(dbPath, folder);
-                        if (!Directory.Exists(folderPath)) continue;
-
-                        foreach (var file in Directory.GetFiles(folderPath, "*.sql"))
-                        {
-                            if (matches.Count >= limit) break;
-                            var fileName = Path.GetFileName(file);
-                            if (fileName.Contains(q, StringComparison.OrdinalIgnoreCase))
-                            {
-                                var routineName = fileName.EndsWith(".sql", StringComparison.OrdinalIgnoreCase)
-                                    ? fileName[..^4]
-                                    : fileName;
-
-                                matches.Add(new SearchContextMatch(
-                                    ServerAlias: serverAlias,
-                                    Database: dbName,
-                                    Type: type,
-                                    Name: routineName,
-                                    Details: $"Matched {type} file in {folder}/",
-                                    RelativePath: $"servers/{serverAlias}/databases/{dbName}/{folder}/{fileName}"
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
+        }
+        catch (Exception ex)
+        {
+            return new SearchContextResult(q, 0, Array.Empty<SearchContextMatch>(), $"Error querying catalog: {ex.Message}");
         }
 
         return new SearchContextResult(

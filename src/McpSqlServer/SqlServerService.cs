@@ -282,6 +282,40 @@ ORDER BY s.name, t.name;";
         };
     }
 
+    public static bool IsCandidateForSampling(ColumnSchemaItem col)
+    {
+        if (col.IsPrimaryKey || col.IsIdentity || !string.IsNullOrEmpty(col.ForeignKeyReference))
+            return false;
+
+        var name = col.Name;
+        var dt = col.DataType.ToLowerInvariant();
+        if (dt.Contains("date") || dt.Contains("time") || dt.Contains("binary") || dt.Contains("image") || dt.Contains("uniqueidentifier"))
+            return false;
+
+        if (name.EndsWith("Id", StringComparison.OrdinalIgnoreCase) ||
+            name.EndsWith("Guid", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Name", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Description", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Title", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Comment", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Note", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Address", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Json", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Payload", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Xml", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Url", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Password", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Secret", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Hash", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("Token", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] whitelist = { "status", "statuscode", "state", "statecode", "type", "typecode", "category", "mode", "priority", "stage", "disposition", "flag" };
+        return whitelist.Any(w => name.Contains(w, StringComparison.OrdinalIgnoreCase));
+    }
+
     public async Task<DatabaseScanReport> ScanDatabaseSchemaAsync(ConnectionOptions options, string databaseName, CancellationToken cancellationToken = default)
     {
         var dbName = databaseName.Trim();
@@ -306,6 +340,79 @@ ORDER BY s.name, t.name;";
             var connectionString = targetOptions.BuildConnectionString();
             await using var connection = new SqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
+
+            // 0. Query Migration History & Last Modify Date
+            string? latestMigrationId = null;
+            int migrationCount = 0;
+            DateTime? lastObjectModifyDate = null;
+
+            const string queryMigrationAndModify = @"
+IF OBJECT_ID('dbo.__EFMigrationsHistory') IS NOT NULL
+BEGIN
+    SELECT 
+        (SELECT TOP 1 MigrationId FROM dbo.__EFMigrationsHistory ORDER BY MigrationId DESC) AS LatestMigrationId,
+        (SELECT COUNT(1) FROM dbo.__EFMigrationsHistory) AS MigrationCount,
+        (SELECT MAX(modify_date) FROM sys.objects WHERE is_ms_shipped = 0) AS LastModifyDate;
+END
+ELSE
+BEGIN
+    SELECT 
+        NULL AS LatestMigrationId,
+        0 AS MigrationCount,
+        (SELECT MAX(modify_date) FROM sys.objects WHERE is_ms_shipped = 0) AS LastModifyDate;
+END";
+
+            try
+            {
+                await using var migCmd = connection.CreateCommand();
+                migCmd.CommandText = queryMigrationAndModify;
+                migCmd.CommandTimeout = options.QueryTimeout;
+                await using var migReader = await migCmd.ExecuteReaderAsync(cancellationToken);
+                if (await migReader.ReadAsync(cancellationToken))
+                {
+                    latestMigrationId = migReader.IsDBNull(0) ? null : migReader.GetString(0);
+                    migrationCount = migReader.IsDBNull(1) ? 0 : migReader.GetInt32(1);
+                    lastObjectModifyDate = migReader.IsDBNull(2) ? null : migReader.GetDateTime(2);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not fetch migration history for '{dbName}': {ex.Message}");
+            }
+
+            // 0b. Query Approximate Row Count & Size in MB via sys.dm_db_partition_stats (Zero IO Overhead)
+            var partitionStats = new Dictionary<string, (long RowCount, double SizeMb)>(StringComparer.OrdinalIgnoreCase);
+            const string queryPartitionStats = @"
+SELECT 
+    s.name AS schema_name,
+    t.name AS table_name,
+    SUM(p.record_count) AS approx_row_count,
+    CAST(ROUND(SUM(p.used_page_count) * 8.0 / 1024.0, 2) AS float) AS approx_size_mb
+FROM sys.dm_db_partition_stats p
+JOIN sys.tables t ON p.object_id = t.object_id
+JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE p.index_id IN (0, 1)
+GROUP BY s.name, t.name;";
+
+            try
+            {
+                await using var partCmd = connection.CreateCommand();
+                partCmd.CommandText = queryPartitionStats;
+                partCmd.CommandTimeout = options.QueryTimeout;
+                await using var partReader = await partCmd.ExecuteReaderAsync(cancellationToken);
+                while (await partReader.ReadAsync(cancellationToken))
+                {
+                    var pSchema = partReader.GetString(0);
+                    var pTable = partReader.GetString(1);
+                    var pRowCount = partReader.GetInt64(2);
+                    var pSizeMb = partReader.GetDouble(3);
+                    partitionStats[$"{pSchema}.{pTable}"] = (pRowCount, pSizeMb);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not fetch partition stats for '{dbName}': {ex.Message}");
+            }
 
             // 1. Scan Tables & Columns (including Data Types, PK, FK, Nullable, Identity, Description, Default Value)
             var tableDict = new Dictionary<string, (string Schema, string Name, List<ColumnSchemaItem> Columns)>();
@@ -379,6 +486,42 @@ ORDER BY s.name, t.name, c.column_id;";
                         tableDict[tableKey] = val;
                     }
                     val.Columns.Add(colItem);
+                }
+            }
+
+            // 1b. Smart Heuristic Sampling for candidate status/code columns
+            foreach (var entry in tableDict.Values)
+            {
+                for (int c = 0; c < entry.Columns.Count; c++)
+                {
+                    var col = entry.Columns[c];
+                    if (!IsCandidateForSampling(col)) continue;
+
+                    try
+                    {
+                        await using var sampleCmd = connection.CreateCommand();
+                        sampleCmd.CommandText = $"SELECT DISTINCT TOP 16 [{col.Name}] FROM [{entry.Schema}].[{entry.Name}] WITH (NOLOCK) WHERE [{col.Name}] IS NOT NULL;";
+                        sampleCmd.CommandTimeout = 3;
+                        await using var sReader = await sampleCmd.ExecuteReaderAsync(cancellationToken);
+                        var sampleList = new List<string>();
+                        while (await sReader.ReadAsync(cancellationToken))
+                        {
+                            if (!sReader.IsDBNull(0))
+                            {
+                                sampleList.Add(sReader.GetValue(0)?.ToString() ?? "");
+                            }
+                        }
+
+                        // Only recognized as status/enum if <= 15 distinct values and > 0
+                        if (sampleList.Count > 0 && sampleList.Count <= 15)
+                        {
+                            entry.Columns[c] = col with { SampleValues = sampleList };
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore sampling errors (timeout or permission)
+                    }
                 }
             }
 
@@ -556,7 +699,15 @@ ORDER BY ts.name, t.name, tr.name;";
                 IReadOnlyList<TriggerSchemaItem> tableTrgs = triggersMap.TryGetValue(tableKey, out var trgs) ? trgs : Array.Empty<TriggerSchemaItem>();
                 IReadOnlyList<CheckConstraintItem> tableCks = checkConstraintsMap.TryGetValue(tableKey, out var cks) ? cks : Array.Empty<CheckConstraintItem>();
 
-                tables.Add(new TableSchemaItem(t.Schema, t.Name, t.Columns, tableIndices, tableTrgs, tableCks));
+                long? approxRows = null;
+                double? approxMb = null;
+                if (partitionStats.TryGetValue(tableKey, out var pStat))
+                {
+                    approxRows = pStat.RowCount;
+                    approxMb = pStat.SizeMb;
+                }
+
+                tables.Add(new TableSchemaItem(t.Schema, t.Name, t.Columns, tableIndices, tableTrgs, tableCks, approxRows, approxMb));
             }
 
             // 5. Scan Views & SQL Logic
@@ -743,11 +894,41 @@ ORDER BY p.object_id, pm.parameter_id;
                 }
             }
 
+            // 8. Scan Cross-Database Dependencies
+            var crossDbDeps = new List<CrossDbDependencyItem>();
+            const string queryCrossDb = @"
+SELECT DISTINCT
+    OBJECT_SCHEMA_NAME(d.referencing_id) + '.' + OBJECT_NAME(d.referencing_id) AS referencing_entity,
+    d.referenced_database_name,
+    ISNULL(d.referenced_schema_name, 'dbo') + '.' + d.referenced_entity_name AS referenced_entity
+FROM sys.sql_expression_dependencies d
+WHERE d.referenced_database_name IS NOT NULL
+ORDER BY d.referenced_database_name, referencing_entity;";
+
+            try
+            {
+                await using var crossCmd = connection.CreateCommand();
+                crossCmd.CommandText = queryCrossDb;
+                crossCmd.CommandTimeout = options.QueryTimeout;
+                await using var crossReader = await crossCmd.ExecuteReaderAsync(cancellationToken);
+                while (await crossReader.ReadAsync(cancellationToken))
+                {
+                    var refing = crossReader.GetString(0);
+                    var refDb = crossReader.GetString(1);
+                    var refEntity = crossReader.GetString(2);
+                    crossDbDeps.Add(new CrossDbDependencyItem(refing, refDb, refEntity));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not fetch cross-database dependencies for '{dbName}': {ex.Message}");
+            }
+
             var procs = procMap.Values
                 .Select(p => new ProcedureSchemaItem(p.Schema, p.Name, p.Params, p.Def))
                 .ToList();
 
-            Logger.Process("SCAN", $"Database '{dbName}' completed: {tables.Count} tables, {views.Count} views, {procs.Count} procedures, {functions.Count} functions, {allTriggers.Count} triggers.");
+            Logger.Process("SCAN", $"Database '{dbName}' completed: {tables.Count} tables, {views.Count} views, {procs.Count} procedures, {functions.Count} functions, {allTriggers.Count} triggers, {crossDbDeps.Count} cross-db references.");
 
             return new DatabaseScanReport(
                 DatabaseName: dbName,
@@ -762,7 +943,11 @@ ORDER BY p.object_id, pm.parameter_id;
                 FunctionCount: functions.Count,
                 TriggerCount: allTriggers.Count,
                 Functions: functions,
-                Triggers: allTriggers
+                Triggers: allTriggers,
+                LatestMigrationId: latestMigrationId,
+                MigrationCount: migrationCount,
+                LastObjectModifyDate: lastObjectModifyDate,
+                CrossDbDependencies: crossDbDeps
             );
         }
         catch (SqlException ex)
@@ -782,6 +967,7 @@ ORDER BY p.object_id, pm.parameter_id;
         ConnectionOptions options,
         bool includeSystem = false,
         Action<string>? onProgress = null,
+        string? targetDatabase = null,
         CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
@@ -809,6 +995,19 @@ ORDER BY p.object_id, pm.parameter_id;
             .Where(d => d.HasAccess != false)
             .ToList();
 
+        if (!string.IsNullOrWhiteSpace(targetDatabase))
+        {
+            var targetName = targetDatabase.Trim();
+            candidateDbs = candidateDbs
+                .Where(d => d.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (candidateDbs.Count == 0)
+            {
+                throw new InvalidOperationException($"Target database '{targetName}' was not found or is offline.");
+            }
+        }
+
         onProgress?.Invoke($"Found {candidateDbs.Count} databases ready to scan (Include system: {includeSystem}).");
 
         var reports = new List<DatabaseScanReport>();
@@ -831,6 +1030,155 @@ ORDER BY p.object_id, pm.parameter_id;
             ElapsedMs: sw.ElapsedMilliseconds,
             Databases: reports
         );
+    }
+
+    public async Task<DriftCheckResult> CheckSchemaDriftAsync(
+        ConnectionOptions options,
+        IReadOnlyDictionary<string, DatabaseMigrationStatus>? cachedMigrations,
+        CancellationToken cancellationToken = default)
+    {
+        var alias = string.IsNullOrWhiteSpace(options.ServerAlias) ? "DEV" : options.ServerAlias.Trim();
+        var drifted = new List<DatabaseDriftInfo>();
+        var upToDate = new List<DatabaseDriftInfo>();
+
+        try
+        {
+            var dbListResult = await ListDatabasesAsync(options, cancellationToken);
+            if (!dbListResult.Success)
+            {
+                return new DriftCheckResult(false, alias, drifted, upToDate, dbListResult.ErrorMessage);
+            }
+
+            var candidateDbs = dbListResult.Databases
+                .Where(d => !d.IsSystem && d.State.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) && d.HasAccess != false)
+                .ToList();
+
+            foreach (var db in candidateDbs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var targetOptions = new ConnectionOptions
+                {
+                    ServerAlias = options.ServerAlias,
+                    Server = options.Server,
+                    Username = options.Username,
+                    Password = options.Password,
+                    Port = options.Port,
+                    Database = db.Name,
+                    Encrypt = options.Encrypt,
+                    TrustServerCertificate = options.TrustServerCertificate,
+                    ConnectTimeout = options.ConnectTimeout,
+                    QueryTimeout = 5
+                };
+
+                string? currentMigrationId = null;
+                int currentCount = 0;
+                DateTime? currentLastModify = null;
+
+                try
+                {
+                    var connStr = targetOptions.BuildConnectionString();
+                    await using var conn = new SqlConnection(connStr);
+                    await conn.OpenAsync(cancellationToken);
+
+                    const string checkSql = @"
+IF OBJECT_ID('dbo.__EFMigrationsHistory') IS NOT NULL
+BEGIN
+    SELECT 
+        (SELECT TOP 1 MigrationId FROM dbo.__EFMigrationsHistory ORDER BY MigrationId DESC) AS LatestMigrationId,
+        (SELECT COUNT(1) FROM dbo.__EFMigrationsHistory) AS MigrationCount,
+        (SELECT MAX(modify_date) FROM sys.objects WHERE is_ms_shipped = 0) AS LastModifyDate;
+END
+ELSE
+BEGIN
+    SELECT 
+        NULL AS LatestMigrationId,
+        0 AS MigrationCount,
+        (SELECT MAX(modify_date) FROM sys.objects WHERE is_ms_shipped = 0) AS LastModifyDate;
+END";
+
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = checkSql;
+                    cmd.CommandTimeout = 5;
+                    await using var rdr = await cmd.ExecuteReaderAsync(cancellationToken);
+                    if (await rdr.ReadAsync(cancellationToken))
+                    {
+                        currentMigrationId = rdr.IsDBNull(0) ? null : rdr.GetString(0);
+                        currentCount = rdr.IsDBNull(1) ? 0 : rdr.GetInt32(1);
+                        currentLastModify = rdr.IsDBNull(2) ? null : rdr.GetDateTime(2);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warning($"Could not inspect migration state for '{db.Name}': {ex.Message}");
+                    continue;
+                }
+
+                DatabaseMigrationStatus? cached = null;
+                cachedMigrations?.TryGetValue(db.Name, out cached);
+
+                if (cached == null)
+                {
+                    drifted.Add(new DatabaseDriftInfo(
+                        DatabaseName: db.Name,
+                        HasDrift: true,
+                        SnapshotMigrationId: null,
+                        CurrentMigrationId: currentMigrationId,
+                        SnapshotCount: 0,
+                        CurrentCount: currentCount,
+                        Reason: "Not in snapshot"
+                    ));
+                }
+                else
+                {
+                    if (!string.Equals(cached.LatestMigrationId, currentMigrationId, StringComparison.OrdinalIgnoreCase) ||
+                        cached.MigrationCount != currentCount)
+                    {
+                        var diff = currentCount - cached.MigrationCount;
+                        var diffStr = diff > 0 ? $"+{diff} new migrations" : $"{diff} migrations";
+                        drifted.Add(new DatabaseDriftInfo(
+                            DatabaseName: db.Name,
+                            HasDrift: true,
+                            SnapshotMigrationId: cached.LatestMigrationId,
+                            CurrentMigrationId: currentMigrationId,
+                            SnapshotCount: cached.MigrationCount,
+                            CurrentCount: currentCount,
+                            Reason: $"{diffStr} (Latest: {currentMigrationId ?? "none"})"
+                        ));
+                    }
+                    else if (string.IsNullOrEmpty(currentMigrationId) && currentLastModify.HasValue && cached.LastObjectModifyDate.HasValue && currentLastModify > cached.LastObjectModifyDate.Value.AddSeconds(5))
+                    {
+                        drifted.Add(new DatabaseDriftInfo(
+                            DatabaseName: db.Name,
+                            HasDrift: true,
+                            SnapshotMigrationId: null,
+                            CurrentMigrationId: null,
+                            SnapshotCount: 0,
+                            CurrentCount: 0,
+                            Reason: $"Modified: {currentLastModify:yyyy-MM-dd HH:mm}"
+                        ));
+                    }
+                    else
+                    {
+                        upToDate.Add(new DatabaseDriftInfo(
+                            DatabaseName: db.Name,
+                            HasDrift: false,
+                            SnapshotMigrationId: cached.LatestMigrationId,
+                            CurrentMigrationId: currentMigrationId,
+                            SnapshotCount: cached.MigrationCount,
+                            CurrentCount: currentCount,
+                            Reason: "Up to date"
+                        ));
+                    }
+                }
+            }
+
+            return new DriftCheckResult(true, alias, drifted, upToDate);
+        }
+        catch (Exception ex)
+        {
+            return new DriftCheckResult(false, alias, drifted, upToDate, ex.Message);
+        }
     }
 
     public static (bool IsValid, string? ErrorMessage) ValidateReadOnlyQuery(string sql)

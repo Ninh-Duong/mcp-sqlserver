@@ -109,4 +109,58 @@ public class SqlServerServiceTests
         Assert.Equal(0, result.TableCount);
         Assert.Empty(result.Tables);
     }
+
+    [Theory]
+    [InlineData("Status", "varchar(20)", false, false, false, null, true)]
+    [InlineData("StatusCode", "nvarchar(10)", false, false, false, null, true)]
+    [InlineData("State", "int", false, false, false, null, true)]
+    [InlineData("LeadType", "nvarchar(50)", false, false, false, null, true)]
+    [InlineData("Priority", "int", false, false, false, null, true)]
+    [InlineData("Stage", "varchar(30)", false, false, false, null, true)]
+    [InlineData("IsActiveFlag", "bit", false, false, false, null, true)]
+    [InlineData("CustomerName", "nvarchar(100)", false, false, false, null, false)]
+    [InlineData("Description", "nvarchar(max)", false, false, false, null, false)]
+    [InlineData("UserId", "int", false, false, false, null, false)]
+    [InlineData("StatusId", "int", false, false, false, null, false)]
+    [InlineData("Status", "int", true, false, false, null, false)] // PK
+    [InlineData("Status", "int", false, true, false, null, false)] // Identity
+    [InlineData("Status", "int", false, false, false, "dbo.StatusRef.Id", false)] // FK
+    [InlineData("CreatedDate", "datetime2", false, false, false, null, false)]
+    public void IsCandidateForSampling_EnforcesSmartHeuristicRules(
+        string columnName,
+        string dataType,
+        bool isPk,
+        bool isIdentity,
+        bool isNullable,
+        string? fkRef,
+        bool expectedCandidate)
+    {
+        var col = new ColumnSchemaItem(
+            Name: columnName,
+            DataType: dataType,
+            IsNullable: isNullable,
+            IsPrimaryKey: isPk,
+            IsIdentity: isIdentity,
+            ForeignKeyReference: fkRef
+        );
+
+        var isCandidate = SqlServerService.IsCandidateForSampling(col);
+        Assert.Equal(expectedCandidate, isCandidate);
+    }
+
+    [Fact]
+    public void ColumnSchemaItem_WithSampleValues_FormatsCleanly()
+    {
+        var col = new ColumnSchemaItem(
+            Name: "LeadStatus",
+            DataType: "varchar(20)",
+            IsNullable: false,
+            IsPrimaryKey: false,
+            IsIdentity: false,
+            SampleValues: ["NEW", "CONTACTED", "QUALIFIED", "LOST"]
+        );
+
+        var compact = col.ToCompactString();
+        Assert.Contains("Values: ['NEW', 'CONTACTED', 'QUALIFIED', 'LOST']", compact);
+    }
 }

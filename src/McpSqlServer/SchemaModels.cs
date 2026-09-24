@@ -8,7 +8,8 @@ public record ColumnSchemaItem(
     bool IsIdentity,
     string? ForeignKeyReference = null,
     string? Description = null,
-    string? DefaultValue = null
+    string? DefaultValue = null,
+    IReadOnlyList<string>? SampleValues = null
 )
 {
     public string ToCompactString()
@@ -20,6 +21,11 @@ public record ColumnSchemaItem(
         if (!string.IsNullOrEmpty(DefaultValue)) attributes.Add($"Default: {DefaultValue.Trim()}");
         attributes.Add(IsNullable ? "Null" : "Not Null");
         if (!string.IsNullOrWhiteSpace(Description)) attributes.Add($"Description: {Description.Trim().Replace('\n', ' ')}");
+        if (SampleValues != null && SampleValues.Count > 0)
+        {
+            var vals = string.Join(", ", SampleValues.Select(v => $"'{v}'"));
+            attributes.Add($"Values: [{vals}]");
+        }
 
         return $"- `{Name}`: {DataType} ({string.Join(", ", attributes)})";
     }
@@ -92,19 +98,32 @@ public record FunctionSchemaItem(
     public string FullName => $"{Schema}.{Name}";
 }
 
+public record CrossDbDependencyItem(
+    string ReferencingEntity,
+    string ReferencedDatabase,
+    string ReferencedEntity
+);
+
 public record TableSchemaItem(
     string Schema,
     string Name,
     IReadOnlyList<ColumnSchemaItem> Columns,
     IReadOnlyList<IndexSchemaItem>? Indexes = null,
     IReadOnlyList<TriggerSchemaItem>? Triggers = null,
-    IReadOnlyList<CheckConstraintItem>? CheckConstraints = null
+    IReadOnlyList<CheckConstraintItem>? CheckConstraints = null,
+    long? ApproxRowCount = null,
+    double? ApproxSizeMb = null
 )
 {
     public string FullName => $"{Schema}.{Name}";
-    public IReadOnlyList<IndexSchemaItem> Indexes { get; init; } = Indexes ?? Array.Empty<IndexSchemaItem>();
-    public IReadOnlyList<TriggerSchemaItem> Triggers { get; init; } = Triggers ?? Array.Empty<TriggerSchemaItem>();
-    public IReadOnlyList<CheckConstraintItem> CheckConstraints { get; init; } = CheckConstraints ?? Array.Empty<CheckConstraintItem>();
+    private readonly IReadOnlyList<IndexSchemaItem>? _indexes = Indexes;
+    public IReadOnlyList<IndexSchemaItem> Indexes => _indexes ?? Array.Empty<IndexSchemaItem>();
+
+    private readonly IReadOnlyList<TriggerSchemaItem>? _triggers = Triggers;
+    public IReadOnlyList<TriggerSchemaItem> Triggers => _triggers ?? Array.Empty<TriggerSchemaItem>();
+
+    private readonly IReadOnlyList<CheckConstraintItem>? _checkConstraints = CheckConstraints;
+    public IReadOnlyList<CheckConstraintItem> CheckConstraints => _checkConstraints ?? Array.Empty<CheckConstraintItem>();
 }
 
 public record ViewSchemaItem(
@@ -139,12 +158,47 @@ public record DatabaseScanReport(
     int FunctionCount = 0,
     int TriggerCount = 0,
     IReadOnlyList<FunctionSchemaItem>? Functions = null,
-    IReadOnlyList<TriggerSchemaItem>? Triggers = null
+    IReadOnlyList<TriggerSchemaItem>? Triggers = null,
+    string? LatestMigrationId = null,
+    int MigrationCount = 0,
+    DateTime? LastObjectModifyDate = null,
+    IReadOnlyList<CrossDbDependencyItem>? CrossDbDependencies = null
 )
 {
-    public IReadOnlyList<FunctionSchemaItem> Functions { get; init; } = Functions ?? Array.Empty<FunctionSchemaItem>();
-    public IReadOnlyList<TriggerSchemaItem> Triggers { get; init; } = Triggers ?? Array.Empty<TriggerSchemaItem>();
+    private readonly IReadOnlyList<FunctionSchemaItem>? _functions = Functions;
+    public IReadOnlyList<FunctionSchemaItem> Functions => _functions ?? Array.Empty<FunctionSchemaItem>();
+
+    private readonly IReadOnlyList<TriggerSchemaItem>? _triggers = Triggers;
+    public IReadOnlyList<TriggerSchemaItem> Triggers => _triggers ?? Array.Empty<TriggerSchemaItem>();
+
+    private readonly IReadOnlyList<CrossDbDependencyItem>? _crossDbDependencies = CrossDbDependencies;
+    public IReadOnlyList<CrossDbDependencyItem> CrossDbDependencies => _crossDbDependencies ?? Array.Empty<CrossDbDependencyItem>();
 }
+
+public record DatabaseMigrationStatus(
+    string DatabaseName,
+    string? LatestMigrationId,
+    int MigrationCount,
+    DateTime? LastObjectModifyDate
+);
+
+public record DatabaseDriftInfo(
+    string DatabaseName,
+    bool HasDrift,
+    string? SnapshotMigrationId,
+    string? CurrentMigrationId,
+    int SnapshotCount,
+    int CurrentCount,
+    string Reason
+);
+
+public record DriftCheckResult(
+    bool Success,
+    string ServerAlias,
+    IReadOnlyList<DatabaseDriftInfo> DriftedDatabases,
+    IReadOnlyList<DatabaseDriftInfo> UpToDateDatabases,
+    string? ErrorMessage = null
+);
 
 public record ServerScanResult(
     string ServerAlias,

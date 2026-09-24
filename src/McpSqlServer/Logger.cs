@@ -88,6 +88,7 @@ public static class Logger
 
     public static void Info(string message) => Log("INFO", message);
     public static void Warn(string message) => Log("WARN", message);
+    public static void Warning(string message) => Warn(message);
     public static void Error(string message, Exception? ex = null)
     {
         var fullMessage = ex != null ? $"{message} -> {ex.Message}" : message;
