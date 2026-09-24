@@ -330,10 +330,15 @@ public class CliMenu
         Console.Write("Export directory [default: ./ai-context]: ");
         var outDir = Console.ReadLine()?.Trim();
         if (string.IsNullOrEmpty(outDir)) outDir = "./ai-context";
-        Console.Write("Resume unfinished scan from this directory? [y/N]: ");
-        var resumeInput = Console.ReadLine()?.Trim();
-        var resume = resumeInput?.Equals("y", StringComparison.OrdinalIgnoreCase) == true ||
-                     resumeInput?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
+        var resume = false;
+        if (ScanCheckpoint.HasCheckpoint(outDir, _options.ServerAlias, _options.Server))
+        {
+            Console.Write("Found unfinished scan checkpoint. Resume previous scan? [Y/n]: ");
+            var resumeInput = Console.ReadLine()?.Trim();
+            resume = string.IsNullOrEmpty(resumeInput) ||
+                     resumeInput.Equals("y", StringComparison.OrdinalIgnoreCase) ||
+                     resumeInput.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        }
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -365,6 +370,7 @@ public class CliMenu
             }
             else
             {
+                ScanCheckpoint.DeleteCheckpoint(outDir, _options.ServerAlias, _options.Server);
                 _connectionStatus = $"Scanned server {_options.ServerAlias} ({scanResult.Databases.Count} DBs)";
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine();

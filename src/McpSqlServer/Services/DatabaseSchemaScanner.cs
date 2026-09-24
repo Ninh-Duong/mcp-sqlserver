@@ -770,6 +770,11 @@ ORDER BY pm.object_id, pm.parameter_id;";
         ScanCheckpoint? checkpoint = null;
         if (outputDirectory != null && targetDatabase == null)
         {
+            if (resume && !ScanCheckpoint.HasCheckpoint(outputDirectory, alias, options.Server))
+            {
+                onProgress?.Invoke("No existing scan checkpoint found. Starting full scan instead.");
+                resume = false;
+            }
             checkpoint = await ScanCheckpoint.OpenAsync(outputDirectory, alias, options.Server, names, resume, cancellationToken);
             if (resume)
                 onProgress?.Invoke($"Resuming: {checkpoint.GetCompletedReports().Count} cached reports, {checkpoint.PendingDatabases.Count} databases to scan.");
