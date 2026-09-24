@@ -25,7 +25,7 @@ public static class PreflightChecker
             errors.Add($".NET 10 or higher required. Current runtime: {Environment.Version}");
         }
 
-        // 2. Verify Microsoft.Data.SqlClient package
+        // 2. Verify Microsoft.Data.SqlClient and Microsoft.Data.Sqlite packages
         try
         {
             var testConn = typeof(SqlConnection);
@@ -34,6 +34,16 @@ public static class PreflightChecker
         catch (Exception ex)
         {
             errors.Add($"Missing or faulty Microsoft.Data.SqlClient assembly: {ex.Message}. Please run 'dotnet restore'.");
+        }
+
+        try
+        {
+            var testSqlite = typeof(Microsoft.Data.Sqlite.SqliteConnection);
+            passed.Add($"Sqlite library ready: {testSqlite.Assembly.GetName().Name} v{testSqlite.Assembly.GetName().Version}");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"Missing or faulty Microsoft.Data.Sqlite assembly: {ex.Message}. Please run 'dotnet restore'.");
         }
 
         // 3. Verify JSON serializer & Cryptography
@@ -186,6 +196,28 @@ public static class PreflightChecker
         catch (Exception ex)
         {
             errors.Add($"SelfTest [ValidateReadOnlyQuery] exception: {ex.Message}");
+        }
+
+        // Test 6: In-Memory SQLite Catalog Functionality
+        try
+        {
+            using var sqliteConn = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");
+            sqliteConn.Open();
+            using var cmd = sqliteConn.CreateCommand();
+            cmd.CommandText = "CREATE TABLE test (id INT); INSERT INTO test VALUES (42); SELECT id FROM test;";
+            var scalar = cmd.ExecuteScalar();
+            if (scalar == null || Convert.ToInt32(scalar) != 42)
+            {
+                errors.Add("SelfTest [SqliteCatalog] In-memory SQLite failed execution.");
+            }
+            else
+            {
+                passed.Add("SelfTest [SqliteCatalog]: SQLite Engine & In-Memory PASS.");
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"SelfTest [SqliteCatalog] exception: {ex.Message}");
         }
 
         return new PreflightReport(errors.Count == 0, passed, errors);

@@ -47,7 +47,7 @@ public class McpServerHandlerTests
         Assert.Equal(2, root.GetProperty("id").GetInt64());
         var tools = root.GetProperty("result").GetProperty("tools");
 
-        Assert.Equal(6, tools.GetArrayLength());
+        Assert.Equal(7, tools.GetArrayLength());
 
         var toolNames = new List<string>();
         foreach (var tool in tools.EnumerateArray())
@@ -59,6 +59,7 @@ public class McpServerHandlerTests
         Assert.Contains("list_databases", toolNames);
         Assert.Contains("list_tables", toolNames);
         Assert.Contains("scan_server_context", toolNames);
+        Assert.Contains("check_schema_drift", toolNames);
         Assert.Contains("execute_query", toolNames);
         Assert.Contains("search_context", toolNames);
     }

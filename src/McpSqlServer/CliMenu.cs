@@ -41,12 +41,13 @@ public class CliMenu
 
             Console.WriteLine("1. Configure connection settings");
             Console.WriteLine("2. Test connection");
-            Console.WriteLine("3. List databases");
-            Console.WriteLine("4. List tables in database");
-            Console.WriteLine("5. Scan Server & Export AI Context Docs (DEV/UAT/PROD)");
+            Console.WriteLine("3. Check DB Migrations & Schema Drift");
+            Console.WriteLine("4. List databases");
+            Console.WriteLine("5. List tables in database");
+            Console.WriteLine("6. Scan Server & Export AI Context Docs (DEV/UAT/PROD)");
             Console.WriteLine("0. Exit");
             Console.WriteLine();
-            Console.Write("Select option (0-5): ");
+            Console.Write("Select option (0-6): ");
 
             var choice = Console.ReadLine()?.Trim();
             if (choice == null) break; // Clean EOF
@@ -61,12 +62,15 @@ public class CliMenu
                     await TestConnectionAsync(cancellationToken);
                     break;
                 case "3":
-                    await ListDatabasesAsync(cancellationToken);
+                    await CheckDbMigrationsAndDriftAsync(cancellationToken);
                     break;
                 case "4":
-                    await ListTablesInDatabaseAsync(cancellationToken);
+                    await ListDatabasesAsync(cancellationToken);
                     break;
                 case "5":
+                    await ListTablesInDatabaseAsync(cancellationToken);
+                    break;
+                case "6":
                     await ScanServerAndExportContextAsync(cancellationToken);
                     break;
                 case "0":
@@ -362,6 +366,110 @@ public class CliMenu
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"\n[FAILED] Scan process interrupted: {Logger.Sanitize(ex.Message)}");
             Console.ResetColor();
+        }
+
+        Console.WriteLine("\nPress Enter to return to menu...");
+        Console.ReadLine();
+    }
+
+    private async Task CheckDbMigrationsAndDriftAsync(CancellationToken cancellationToken)
+    {
+        if (!EnsureConfigured()) return;
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("==================================================");
+        Console.WriteLine("    CHECK DATABASE MIGRATIONS & SCHEMA DRIFT");
+        Console.WriteLine("==================================================");
+        Console.ResetColor();
+
+        Console.WriteLine($"Inspecting live databases on [{_options.ServerAlias}] ({_options.Server})...\n");
+
+        var outDir = "./ai-context";
+        var registryPath = Path.Combine(outDir, "servers_registry.json");
+        IReadOnlyDictionary<string, DatabaseMigrationStatus>? cachedMigrations = null;
+
+        if (File.Exists(registryPath))
+        {
+            try
+            {
+                var json = await File.ReadAllTextAsync(registryPath, cancellationToken);
+                var items = System.Text.Json.JsonSerializer.Deserialize<List<ServerRegistryItem>>(json);
+                var serverItem = items?.FirstOrDefault(i => i.ServerAlias.Equals(_options.ServerAlias, StringComparison.OrdinalIgnoreCase))
+                                 ?? items?.FirstOrDefault();
+                cachedMigrations = serverItem?.Migrations;
+            }
+            catch { }
+        }
+
+        var driftResult = await _sqlService.CheckSchemaDriftAsync(_options, cachedMigrations, cancellationToken);
+        if (!driftResult.Success)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[ERROR] Check failed: {driftResult.ErrorMessage}");
+            Console.ResetColor();
+            Console.WriteLine("\nPress Enter to return to menu...");
+            Console.ReadLine();
+            return;
+        }
+
+        Console.WriteLine($"Found {driftResult.DriftedDatabases.Count + driftResult.UpToDateDatabases.Count} accessible databases.\n");
+
+        if (driftResult.DriftedDatabases.Count == 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"✔ All {driftResult.UpToDateDatabases.Count} databases are UP TO DATE with ai-context snapshot.");
+            Console.ResetColor();
+        }
+        else
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ Schema Drift detected in {driftResult.DriftedDatabases.Count} database(s):\n");
+            Console.ResetColor();
+
+            foreach (var d in driftResult.DriftedDatabases)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($" - [{d.DatabaseName}]: {d.Reason}");
+                Console.ResetColor();
+                if (!string.IsNullOrEmpty(d.CurrentMigrationId) || !string.IsNullOrEmpty(d.SnapshotMigrationId))
+                {
+                    Console.WriteLine($"     Current DB Migration : {d.CurrentMigrationId ?? "(none)"} ({d.CurrentCount} total)");
+                    Console.WriteLine($"     Snapshot Migration   : {d.SnapshotMigrationId ?? "(none)"} ({d.SnapshotCount} total)");
+                }
+            }
+
+            Console.WriteLine();
+            Console.Write("Enter database name to re-scan (or 'all' to re-scan all / Enter to cancel): ");
+            var target = Console.ReadLine()?.Trim();
+            if (!string.IsNullOrEmpty(target))
+            {
+                var targetDb = target.Equals("all", StringComparison.OrdinalIgnoreCase) ? null : target;
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine($"\nStarting targeted scan for {(targetDb ?? "ALL databases")}...");
+                Console.ResetColor();
+
+                try
+                {
+                    var scanResult = await _sqlService.ScanServerAsync(
+                        _options,
+                        includeSystem: false,
+                        onProgress: msg => Console.WriteLine($" [PROGRESS] {msg}"),
+                        targetDatabase: targetDb,
+                        cancellationToken: cancellationToken);
+
+                    var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir, cancellationToken);
+
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine($"\n[SUCCESS] Re-scan finished in {scanResult.ElapsedMs} ms ({files.Count} files updated)!");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"\n[FAILED] Re-scan error: {Logger.Sanitize(ex.Message)}");
+                    Console.ResetColor();
+                }
+            }
         }
 
         Console.WriteLine("\nPress Enter to return to menu...");

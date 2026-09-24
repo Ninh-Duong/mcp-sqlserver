@@ -119,12 +119,9 @@ public class AiContextRendererTests
             Assert.True(File.Exists(viewFile));
             Assert.True(File.Exists(procFile));
 
-            // Verify GLOBAL_TABLES_MAP.compact.md
-            var globalMapFile = Path.Combine(tempDir, "servers", "DEV", "GLOBAL_TABLES_MAP.compact.md");
-            Assert.True(File.Exists(globalMapFile));
-            var globalMapContent = await File.ReadAllTextAsync(globalMapFile);
-            Assert.Contains("SalesDb.dbo.Orders", globalMapContent);
-            Assert.Contains("Id(PK)", globalMapContent);
+            // Verify catalog.db
+            var catalogDbFile = Path.Combine(tempDir, "catalog.db");
+            Assert.True(File.Exists(catalogDbFile));
 
             // 2. Scan PROD (verify Master Index preserves DEV and adds PROD)
             var prodResult = new ServerScanResult(
@@ -339,6 +336,84 @@ public class AiContextRendererTests
             Assert.True(File.Exists(routerPath));
             var routerContent = await File.ReadAllTextAsync(routerPath);
             Assert.Contains("Customers", routerContent);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public void RenderCompactSchema_RendersVolumeStatsAndSampleValues()
+    {
+        var col = new ColumnSchemaItem("Status", "int", false, false, false, SampleValues: ["1", "2", "3"]);
+        var table = new TableSchemaItem("dbo", "Orders", [col], ApproxRowCount: 1_250_000, ApproxSizeMb: 450.2);
+
+        var report = new DatabaseScanReport(
+            DatabaseName: "SalesDb",
+            Success: true,
+            TableCount: 1,
+            ViewCount: 0,
+            ProcedureCount: 0,
+            Tables: [table],
+            Views: [],
+            Procedures: [],
+            LatestMigrationId: "20260924_Init",
+            MigrationCount: 5
+        );
+
+        var markdown = AiContextRenderer.RenderCompactSchema("DEV", report);
+
+        Assert.Contains("dbo.Orders (~1.3M rows | 450.2 MB) [HIGH VOLUME]", markdown);
+        Assert.Contains("Values: ['1', '2', '3']", markdown);
+        Assert.Contains("Migration: Latest = `20260924_Init` (5 total)", markdown);
+    }
+
+    [Fact]
+    public async Task RenderAndExportAsync_GeneratesCrossDbDependenciesMap()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_crossdb_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var deps = new List<CrossDbDependencyItem>
+            {
+                new("dbo.GetLeadOverview", "CRM_Tenant", "dbo.Customer"),
+                new("dbo.vw_ActiveLeads", "CRM_Master", "dbo.Tenant")
+            };
+
+            var scanResult = new ServerScanResult(
+                ServerAlias: "DEV",
+                ServerHost: "sql-dev.local",
+                ServerVersion: "SQL Server 2022",
+                ScannedAt: DateTime.Now,
+                ElapsedMs: 120,
+                Databases:
+                [
+                    new DatabaseScanReport(
+                        DatabaseName: "CRM_Lead",
+                        Success: true,
+                        TableCount: 1,
+                        ViewCount: 1,
+                        ProcedureCount: 1,
+                        Tables: [new TableSchemaItem("dbo", "Lead", [new ColumnSchemaItem("Id", "int", false, true, true)])],
+                        Views: [new ViewSchemaItem("dbo", "vw_ActiveLeads", "SELECT 1")],
+                        Procedures: [new ProcedureSchemaItem("dbo", "GetLeadOverview", [], "SELECT 1")],
+                        CrossDbDependencies: deps
+                    )
+                ]
+            );
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            var crossDbPath = Path.Combine(tempDir, "servers", "DEV", "CROSS_DB_DEPENDENCIES.compact.md");
+            Assert.True(File.Exists(crossDbPath));
+            var content = await File.ReadAllTextAsync(crossDbPath);
+            Assert.Contains("References **`CRM_Tenant`**:", content);
+            Assert.Contains("References **`CRM_Master`**:", content);
+            Assert.Contains("`CRM_Lead.dbo.GetLeadOverview` -> `CRM_Tenant.dbo.Customer`", content);
         }
         finally
         {
