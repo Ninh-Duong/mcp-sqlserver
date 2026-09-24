@@ -746,6 +746,7 @@ ORDER BY pm.object_id, pm.parameter_id;";
         }
 
         var candidateDbs = dbListResult.Databases
+            .Where(d => !d.Name.Equals("tempdb", StringComparison.OrdinalIgnoreCase))
             .Where(d => includeSystem || !d.IsSystem)
             .Where(d => d.State.Equals("ONLINE", StringComparison.OrdinalIgnoreCase))
             .Where(d => d.HasAccess != false)

@@ -148,6 +148,56 @@ public record TableSchemaItem(
 
     private readonly IReadOnlyList<CheckConstraintItem>? _checkConstraints = CheckConstraints;
     public IReadOnlyList<CheckConstraintItem> CheckConstraints => _checkConstraints ?? Array.Empty<CheckConstraintItem>();
+
+    public string RenderCompactTableDefinition()
+    {
+        var sb = new System.Text.StringBuilder();
+        var volSuffix = "";
+        if (ApproxRowCount.HasValue)
+        {
+            var r = ApproxRowCount.Value;
+            var rStr = r >= 1_000_000
+                ? (r / 1_000_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "M"
+                : r >= 1_000
+                    ? (r / 1_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "K"
+                    : $"{r}";
+            var sStr = ApproxSizeMb.HasValue
+                ? $" | {ApproxSizeMb.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} MB"
+                : "";
+            var highVol = r >= 100_000 ? " [HIGH VOLUME]" : "";
+            volSuffix = $" (~{rStr} rows{sStr}){highVol}";
+        }
+        else
+        {
+            volSuffix = " (Stats: unavailable)";
+        }
+
+        sb.AppendLine($"### {FullName}{volSuffix}");
+        foreach (var col in Columns)
+        {
+            sb.AppendLine(col.ToCompactString());
+        }
+
+        if (CheckConstraints.Count > 0)
+        {
+            var checksStr = string.Join("; ", CheckConstraints.Select(c => c.ToCompactString()));
+            sb.AppendLine($"- Check Constraints: {checksStr}");
+        }
+
+        if (Indexes.Count > 0)
+        {
+            var idxStr = string.Join("; ", Indexes.Select(i => i.ToCompactString()));
+            sb.AppendLine($"- Indexes: {idxStr}");
+        }
+
+        if (Triggers.Count > 0)
+        {
+            var trgStr = string.Join("; ", Triggers.Select(t => $"{t.Name} ({t.Events})"));
+            sb.AppendLine($"- Triggers: {trgStr}");
+        }
+
+        return sb.ToString();
+    }
 }
 
 public record ViewSchemaItem(

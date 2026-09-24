@@ -6,6 +6,8 @@ namespace McpSqlServer;
 
 public class AiContextRenderer
 {
+    public const int TableModularThreshold = 50;
+
     public static async Task<IReadOnlyList<string>> RenderAndExportAsync(
         ServerScanResult scanResult,
         string outputDirectory = "./ai-context",
@@ -47,6 +49,7 @@ public class AiContextRenderer
             if (!db.Success) continue;
 
             var dbDir = Path.Combine(serverDir, "databases", db.DatabaseName);
+            var tablesDir = Path.Combine(dbDir, "tables");
             var viewsDir = Path.Combine(dbDir, "views");
             var procsDir = Path.Combine(dbDir, "procedures");
             var funcsDir = Path.Combine(dbDir, "functions");
@@ -57,6 +60,57 @@ public class AiContextRenderer
             if (db.Procedures.Count > 0) Directory.CreateDirectory(procsDir);
             if (db.Functions.Count > 0) Directory.CreateDirectory(funcsDir);
             if (db.Triggers.Count > 0) Directory.CreateDirectory(trgsDir);
+
+            // Export individual Table files if table count exceeds threshold
+            if (db.Tables.Count > TableModularThreshold)
+            {
+                Directory.CreateDirectory(tablesDir);
+                foreach (var table in db.Tables)
+                {
+                    var safeTableName = SanitizeFileName($"{table.Schema}.{table.Name}.compact.md");
+                    var tablePath = Path.Combine(tablesDir, safeTableName);
+                    var tableContent = $"# Table: {table.FullName} (Database: {db.DatabaseName} | Server: {scanResult.ServerAlias})\n\n" + table.RenderCompactTableDefinition();
+                    await File.WriteAllTextAsync(tablePath, tableContent, Encoding.UTF8, cancellationToken);
+                    createdFiles.Add(tablePath);
+                }
+                CleanupOrphanFiles(tablesDir, db.Tables.Select(t => SanitizeFileName($"{t.Schema}.{t.Name}.compact.md")), "*.compact.md");
+            }
+            else if (Directory.Exists(tablesDir))
+            {
+                // Clean up tables directory if no longer above threshold
+                try { Directory.Delete(tablesDir, true); } catch { }
+            }
+
+            // Write local database dependencies.compact.md
+            var validCrossDb = db.CrossDbDependencies
+                .Where(d => !string.IsNullOrWhiteSpace(d.ReferencedDatabase) && !d.ReferencedDatabase.Equals(db.DatabaseName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var dbDepPath = Path.Combine(dbDir, "dependencies.compact.md");
+            if (validCrossDb.Count > 0)
+            {
+                var dbSb = new StringBuilder();
+                dbSb.AppendLine($"# Database Dependencies: {db.DatabaseName} (Server: {scanResult.ServerAlias})");
+                dbSb.AppendLine();
+                dbSb.AppendLine($"> Inter-database references originating from `{db.DatabaseName}`.");
+                dbSb.AppendLine();
+                var grouped = validCrossDb.GroupBy(d => d.ReferencedDatabase, StringComparer.OrdinalIgnoreCase);
+                foreach (var grp in grouped)
+                {
+                    dbSb.AppendLine($"## References **`{grp.Key}`**");
+                    foreach (var item in grp)
+                    {
+                        dbSb.AppendLine($"- `{db.DatabaseName}.{item.ReferencingEntity}` -> `{grp.Key}.{item.ReferencedEntity}`");
+                    }
+                    dbSb.AppendLine();
+                }
+                await File.WriteAllTextAsync(dbDepPath, dbSb.ToString(), Encoding.UTF8, cancellationToken);
+                createdFiles.Add(dbDepPath);
+            }
+            else if (File.Exists(dbDepPath))
+            {
+                try { File.Delete(dbDepPath); } catch { }
+            }
 
             // Write schema.compact.md
             var compactSchemaPath = Path.Combine(dbDir, "schema.compact.md");
@@ -157,10 +211,21 @@ public class AiContextRenderer
             }
         }
 
+        var systemDbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "master", "msdb", "model", "tempdb", "rdsadmin" };
+        foreach (var sysDb in systemDbs)
+        {
+            existingRouterLines.Remove(sysDb);
+        }
+
         foreach (var db in scanResult.Databases.Where(d => d.Success && d.Tables.Count > 0))
         {
-            var tableNames = string.Join(", ", db.Tables.Select(t => t.Name));
-            existingRouterLines[db.DatabaseName] = $"- **`{db.DatabaseName}`**: {tableNames}";
+            if (systemDbs.Contains(db.DatabaseName)) continue;
+            var cleanTables = db.Tables.Where(t => !t.Name.StartsWith("#")).Select(t => t.Name);
+            var tableNames = string.Join(", ", cleanTables);
+            if (!string.IsNullOrWhiteSpace(tableNames))
+            {
+                existingRouterLines[db.DatabaseName] = $"- **`{db.DatabaseName}`**: {tableNames}";
+            }
         }
 
         var routerSb = new StringBuilder();
@@ -264,6 +329,61 @@ public class AiContextRenderer
         await File.WriteAllTextAsync(crossDbPath, crossDbSb.ToString(), Encoding.UTF8, cancellationToken);
         createdFiles.Add(crossDbPath);
 
+        // 4b. Write Cross-Database Graph (High-Level Summary Matrix ~3KB)
+        var crossDbGraphPath = Path.Combine(serverDir, "CROSS_DB_GRAPH.compact.md");
+        var graphSb = new StringBuilder();
+        graphSb.AppendLine($"# Cross-Database Dependencies Graph: {scanResult.ServerAlias}");
+        graphSb.AppendLine();
+        graphSb.AppendLine("> High-level inter-database dependency matrix (~3KB).");
+        graphSb.AppendLine("> For detailed entity references, inspect `./databases/{DB}/dependencies.compact.md` or call `search_context(query, target: \"dependency\")`.");
+        graphSb.AppendLine($"> Last updated: {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
+        graphSb.AppendLine();
+        graphSb.AppendLine("| Source Database | Target Database | References Count | Detail Link |");
+        graphSb.AppendLine("|:---|:---|:---:|:---|");
+
+        int totalCrossDbEdges = 0;
+        foreach (var kv in existingDbSections.OrderBy(k => k.Key))
+        {
+            var dbName = kv.Key;
+            var text = kv.Value;
+            var lines = text.Split('\n');
+            string? currentTarget = null;
+            int count = 0;
+            foreach (var l in lines)
+            {
+                var trimmed = l.Trim();
+                if (trimmed.StartsWith("- References **`") && trimmed.Contains("`**:"))
+                {
+                    if (currentTarget != null && count > 0)
+                    {
+                        graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
+                        totalCrossDbEdges += count;
+                    }
+                    var start = trimmed.IndexOf("`") + 1;
+                    var end = trimmed.IndexOf("`**:");
+                    currentTarget = trimmed.Substring(start, end - start);
+                    count = 0;
+                }
+                else if (trimmed.StartsWith("- `") && trimmed.Contains("` -> `"))
+                {
+                    count++;
+                }
+            }
+            if (currentTarget != null && count > 0)
+            {
+                graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
+                totalCrossDbEdges += count;
+            }
+        }
+
+        if (totalCrossDbEdges == 0)
+        {
+            graphSb.AppendLine("| *(None)* | *(None)* | 0 | *(No cross-database dependencies detected)* |");
+        }
+
+        await File.WriteAllTextAsync(crossDbGraphPath, graphSb.ToString(), Encoding.UTF8, cancellationToken);
+        createdFiles.Add(crossDbGraphPath);
+
         // 5. Write / Merge Server Overview summary.md
         var summaryPath = Path.Combine(serverDir, "summary.md");
         var existingSummaryRows = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -297,6 +417,7 @@ public class AiContextRenderer
         summarySb.AppendLine($"- **Execution Duration:** {scanResult.ElapsedMs} ms");
         summarySb.AppendLine($"- **Total Databases:** {existingSummaryRows.Count}");
         summarySb.AppendLine($"- **Fast Router Map (~20KB):** [TABLES_ROUTER.compact.md](./TABLES_ROUTER.compact.md)");
+        summarySb.AppendLine($"- **Cross-DB Dependencies Graph (~3KB):** [CROSS_DB_GRAPH.compact.md](./CROSS_DB_GRAPH.compact.md)");
         summarySb.AppendLine($"- **Cross-DB Dependencies:** [CROSS_DB_DEPENDENCIES.compact.md](./CROSS_DB_DEPENDENCIES.compact.md)");
         summarySb.AppendLine($"- **SQLite Catalog (FTS5):** `../../catalog.db` (Searched instantly via tool `search_context`)");
         summarySb.AppendLine();
@@ -355,7 +476,7 @@ public class AiContextRenderer
         => AiContextCatalog.UpdateCatalogDbAsync(baseDir, serverAlias, databases, cancellationToken);
 
 
-    public static string RenderCompactSchema(string serverAlias, DatabaseScanReport db)
+    public static string RenderCompactSchema(string serverAlias, DatabaseScanReport db, int tableModularThreshold = TableModularThreshold)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"# Database Schema: {db.DatabaseName} (Server: {serverAlias})");
@@ -374,54 +495,39 @@ public class AiContextRenderer
         {
             sb.AppendLine("*(No tables found or login lacks metadata permissions)*");
         }
-        else
+        else if (db.Tables.Count > tableModularThreshold)
         {
+            sb.AppendLine($"> 💡 **Modular Schema Notice**: This database contains **{db.Tables.Count}** tables. To eliminate token waste, detailed column specifications, constraints, and indexes are partitioned into individual files in `./tables/`.");
+            sb.AppendLine($"> Fast Lookup: Call MCP tool `get_object_context(database: \"{db.DatabaseName}\", name: \"TableName\", type: \"table\")`.");
+            sb.AppendLine();
+            sb.AppendLine("| Table | Approx Rows | Approx Size | Primary Key | Detail File Link |");
+            sb.AppendLine("|:---|:---:|:---:|:---|:---|");
             foreach (var table in db.Tables)
             {
-                var volSuffix = "";
+                var rStr = "-";
                 if (table.ApproxRowCount.HasValue)
                 {
                     var r = table.ApproxRowCount.Value;
-                    var rStr = r >= 1_000_000
+                    rStr = r >= 1_000_000
                         ? (r / 1_000_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "M"
                         : r >= 1_000
                             ? (r / 1_000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "K"
                             : $"{r}";
-                    var sStr = table.ApproxSizeMb.HasValue
-                        ? $" | {table.ApproxSizeMb.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} MB"
-                        : "";
-                    var highVol = r >= 100_000 ? " [HIGH VOLUME]" : "";
-                    volSuffix = $" (~{rStr} rows{sStr}){highVol}";
                 }
-                else
-                {
-                    volSuffix = " (Stats: unavailable)";
-                }
-
-                sb.AppendLine($"### {table.FullName}{volSuffix}");
-                foreach (var col in table.Columns)
-                {
-                    sb.AppendLine(col.ToCompactString());
-                }
-
-                if (table.CheckConstraints.Count > 0)
-                {
-                    var checksStr = string.Join("; ", table.CheckConstraints.Select(c => c.ToCompactString()));
-                    sb.AppendLine($"- Check Constraints: {checksStr}");
-                }
-
-                if (table.Indexes.Count > 0)
-                {
-                    var idxStr = string.Join("; ", table.Indexes.Select(i => i.ToCompactString()));
-                    sb.AppendLine($"- Indexes: {idxStr}");
-                }
-
-                if (table.Triggers.Count > 0)
-                {
-                    var trgStr = string.Join("; ", table.Triggers.Select(t => $"{t.Name} ({t.Events})"));
-                    sb.AppendLine($"- Triggers: {trgStr}");
-                }
-
+                var sStr = table.ApproxSizeMb.HasValue
+                    ? $"{table.ApproxSizeMb.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} MB"
+                    : "-";
+                var pkCols = table.Columns.Where(c => c.IsPrimaryKey).Select(c => c.Name).ToList();
+                var pkStr = pkCols.Count > 0 ? string.Join(", ", pkCols) : "-";
+                var safeTableName = SanitizeFileName($"{table.Schema}.{table.Name}.compact.md");
+                sb.AppendLine($"| **`{table.FullName}`** | {rStr} | {sStr} | `{pkStr}` | [{safeTableName}](./tables/{safeTableName}) |");
+            }
+        }
+        else
+        {
+            foreach (var table in db.Tables)
+            {
+                sb.Append(table.RenderCompactTableDefinition());
                 sb.AppendLine();
             }
         }
@@ -569,13 +675,14 @@ public class AiContextRenderer
         indexSb.AppendLine();
         indexSb.AppendLine("> 💡 **CRITICAL TOKEN RULE**: Zero Token Waste. High-speed lookup via SQLite catalog.");
         indexSb.AppendLine();
-        indexSb.AppendLine("1. **Instant Search (<1ms, ~50 tokens):** Call MCP tool `search_context(query: \"...\")` to locate exact DB, Table, Column, Procedure, Function, or Trigger from local SQLite `catalog.db`.");
-        indexSb.AppendLine("2. **Low-Token Table Routing (~4,000 tokens):** If searching manually, open `./servers/{ALIAS}/TABLES_ROUTER.compact.md` (~20KB) to find the hosting database.");
-        indexSb.AppendLine("3. **Inspect Compact Schema:** Open `./servers/{ALIAS}/databases/{DB_NAME}/schema.compact.md` for column types, volume stats (~rows/MB), defaults, constraints, PK, FK, and indexes.");
-        indexSb.AppendLine("4. **Inspect Routine Logic:** Open targeted SQL files in `views/`, `procedures/`, `functions/`, or `triggers/`.");
-        indexSb.AppendLine("5. **Inspect Cross-DB Relations:** Check `./servers/{ALIAS}/CROSS_DB_DEPENDENCIES.compact.md` for inter-database references.");
-        indexSb.AppendLine("6. **Detect Drift / Migrations:** Call MCP tool `check_schema_drift` or use CLI option `[3] Check DB Migration Drift`.");
-        indexSb.AppendLine("7. **Query Live Data:** Call MCP tool `execute_query` with a read-only SELECT query to inspect real rows.");
+        indexSb.AppendLine("1. **Precision Object Lookup (<1ms, ~50 tokens):** Call MCP tool `get_object_context(database: \"...\", name: \"...\", type: \"...\")` to fetch the exact schema of a single table, view, procedure, function, or trigger without loading large files.");
+        indexSb.AppendLine("2. **Instant Search (<1ms, ~50 tokens):** Call MCP tool `search_context(query: \"...\")` to locate exact DB, Table, Column, Procedure, Function, Trigger, or Dependency from local SQLite `catalog.db`.");
+        indexSb.AppendLine("3. **Low-Token Table Routing (~15KB):** If searching manually, open `./servers/{ALIAS}/TABLES_ROUTER.compact.md` (~15KB) to find the hosting database.");
+        indexSb.AppendLine("4. **Inspect Compact Schema:** Open `./servers/{ALIAS}/databases/{DB_NAME}/schema.compact.md`. For large databases (>50 tables), schema.compact.md serves as a modular table skeleton index pointing to `./tables/*.compact.md`.");
+        indexSb.AppendLine("5. **Inspect Cross-DB Relations:** Check `./servers/{ALIAS}/CROSS_DB_GRAPH.compact.md` for high-level relationship graph (~3KB), or `./databases/{DB}/dependencies.compact.md` for local dependencies.");
+        indexSb.AppendLine("6. **Inspect Routine Logic:** Open targeted SQL files in `views/`, `procedures/`, `functions/`, or `triggers/`.");
+        indexSb.AppendLine("7. **Detect Drift / Migrations:** Call MCP tool `check_schema_drift` or use CLI option `[3] Check DB Migration Drift`.");
+        indexSb.AppendLine("8. **Query Live Data:** Call MCP tool `execute_query` with a read-only SELECT query to inspect real rows.");
 
         var masterIndexPath = Path.Combine(baseDir, "INDEX.md");
         await File.WriteAllTextAsync(masterIndexPath, indexSb.ToString(), Encoding.UTF8, cancellationToken);
@@ -603,12 +710,11 @@ public class AiContextRenderer
         CancellationToken cancellationToken = default)
         => ObjectContextReader.GetObjectContextAsync(baseDirectory, serverAlias, database, objectName, objectType, cancellationToken);
 
-
-    private static void CleanupOrphanSqlFiles(string directory, IEnumerable<string> activeFileNames)
+    private static void CleanupOrphanFiles(string directory, IEnumerable<string> activeFileNames, string searchPattern = "*.*")
     {
         if (!Directory.Exists(directory)) return;
         var activeSet = new HashSet<string>(activeFileNames, StringComparer.OrdinalIgnoreCase);
-        foreach (var file in Directory.GetFiles(directory, "*.sql"))
+        foreach (var file in Directory.GetFiles(directory, searchPattern))
         {
             var fileName = Path.GetFileName(file);
             if (!activeSet.Contains(fileName))
@@ -617,6 +723,9 @@ public class AiContextRenderer
             }
         }
     }
+
+    private static void CleanupOrphanSqlFiles(string directory, IEnumerable<string> activeFileNames)
+        => CleanupOrphanFiles(directory, activeFileNames, "*.sql");
 
     internal static string SanitizeFileName(string fileName)
     {
