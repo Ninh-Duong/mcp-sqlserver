@@ -40,23 +40,34 @@ public record ColumnSchemaItem(
     }
 }
 
-public record IndexSchemaItem(
-    string Name,
-    bool IsUnique,
-    bool IsPrimaryKey,
-    string TypeDesc,
-    IReadOnlyList<string> KeyColumns,
-    IReadOnlyList<string>? IncludedColumns = null,
-    string? FilterDefinition = null
-)
+public record IndexSchemaItem
 {
+    public string Name { get; init; }
+    public bool IsUnique { get; init; }
+    public bool IsPrimaryKey { get; init; }
+    public string TypeDesc { get; init; }
+    public IReadOnlyList<string> KeyColumns { get; init; }
+    public IReadOnlyList<string> IncludedColumns { get; init; }
+    public string? FilterDefinition { get; init; }
+
+    [System.Text.Json.Serialization.JsonConstructor]
+    public IndexSchemaItem(string Name, bool IsUnique, bool IsPrimaryKey, string TypeDesc,
+        IReadOnlyList<string> KeyColumns, IReadOnlyList<string>? IncludedColumns = null, string? FilterDefinition = null)
+    {
+        this.Name = Name;
+        this.IsUnique = IsUnique;
+        this.IsPrimaryKey = IsPrimaryKey;
+        this.TypeDesc = TypeDesc;
+        this.KeyColumns = KeyColumns;
+        this.IncludedColumns = IncludedColumns ?? Array.Empty<string>();
+        this.FilterDefinition = FilterDefinition;
+    }
+
     public IndexSchemaItem(string name, bool isUnique, bool isPrimaryKey, string typeDesc, IReadOnlyList<string> keyColumns, string? filterDefinition)
         : this(name, isUnique, isPrimaryKey, typeDesc, keyColumns, null, filterDefinition)
     {
     }
 
-    private readonly IReadOnlyList<string>? _includedColumns = IncludedColumns;
-    public IReadOnlyList<string> IncludedColumns => _includedColumns ?? Array.Empty<string>();
     public IReadOnlyList<string> Columns => KeyColumns;
 
     public string ToCompactString()

@@ -214,6 +214,7 @@ public class AiContextRenderer
         // Update or remove sections for the scanned databases
         foreach (var db in scanResult.Databases)
         {
+            if (!db.Success) continue;
             var validCrossDb = db.CrossDbDependencies
                 .Where(d => !string.IsNullOrWhiteSpace(d.ReferencedDatabase) && !d.ReferencedDatabase.Equals(db.DatabaseName, StringComparison.OrdinalIgnoreCase))
                 .ToList();

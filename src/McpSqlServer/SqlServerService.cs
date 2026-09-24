@@ -245,8 +245,10 @@ ORDER BY s.name, t.name;";
         bool includeSystem = false,
         Action<string>? onProgress = null,
         string? targetDatabase = null,
-        CancellationToken cancellationToken = default)
-        => DatabaseSchemaScanner.ScanServerAsync(this, options, includeSystem, onProgress, targetDatabase, cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? outputDirectory = null,
+        bool resume = false)
+        => DatabaseSchemaScanner.ScanServerAsync(this, options, includeSystem, onProgress, targetDatabase, cancellationToken, outputDirectory, resume);
 
     public async Task<DriftCheckResult> CheckSchemaDriftAsync(
         ConnectionOptions options,
