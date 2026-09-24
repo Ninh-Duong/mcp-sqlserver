@@ -242,23 +242,66 @@ public class McpServerHandler
                                         ["type"] = "string",
                                         ["description"] = "Keyword or name of table, column, procedure, view, function, or trigger to locate."
                                     },
-                                    ["target"] = new JsonObject
+                                    ["server_alias"] = new JsonObject
                                     {
                                         ["type"] = "string",
-                                        ["description"] = "Optional search filter: 'all' (default), 'table', 'column', 'routine', 'procedure', 'view', 'function', 'trigger'."
+                                        ["description"] = "Optional server alias to restrict search (e.g. 'DEV', 'PROD')."
                                     },
                                     ["database"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["description"] = "Optional target database name to restrict search."
                                     },
+                                    ["target"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional search filter: 'all' (default), 'table', 'column', 'routine', 'procedure', 'view', 'function', 'trigger'."
+                                    },
                                     ["limit"] = new JsonObject
                                     {
                                         ["type"] = "integer",
-                                        ["description"] = "Maximum number of matches to return (default: 20, max: 100)."
+                                        ["description"] = "Maximum number of matches to return (default: 10, max: 50)."
+                                    },
+                                    ["include_details"] = new JsonObject
+                                    {
+                                        ["type"] = "boolean",
+                                        ["description"] = "Whether to include full details (columns, parameters) in results. Defaults to false for minimal token usage."
                                     }
                                 },
                                 ["required"] = new JsonArray { "query" }
+                            }
+                        },
+                        new JsonObject
+                        {
+                            ["name"] = "get_object_context",
+                            ["description"] = "Retrieve the exact compact definition or SQL code for a specific table, view, procedure, function, or trigger without loading massive files.",
+                            ["inputSchema"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["properties"] = new JsonObject
+                                {
+                                    ["database"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Target database name containing the object."
+                                    },
+                                    ["name"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Target object name (e.g. 'Orders' or 'dbo.sp_GetCustomerSummary')."
+                                    },
+                                    ["server_alias"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional server alias (defaults to configured server)."
+                                    },
+                                    ["type"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["description"] = "Optional object type ('table', 'view', 'procedure', 'function', 'trigger', 'dependency')."
+                                    }
+                                },
+                                ["required"] = new JsonArray { "database", "name" }
                             }
                         }
                     }
@@ -410,6 +453,10 @@ public class McpServerHandler
                         return CreateErrorResponse(idNode, -32602, "Parameter 'query' cannot be empty.");
                     }
 
+                    var serverAlias = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("server_alias", out var sProp)
+                        ? sProp.GetString()
+                        : null;
+
                     var target = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("target", out var targetProp)
                         ? targetProp.GetString()
                         : "all";
@@ -419,12 +466,42 @@ public class McpServerHandler
                         : null;
 
                     var limit = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("limit", out var limProp) && limProp.TryGetInt32(out var l)
-                        ? Math.Clamp(l, 1, 100)
-                        : 20;
+                        ? Math.Clamp(l, 1, 50)
+                        : 10;
 
-                    var searchResult = await AiContextRenderer.SearchContextAsync("./ai-context", query, database, target, limit, cancellationToken);
+                    var includeDetails = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("include_details", out var incProp) && incProp.GetBoolean();
+
+                    var searchResult = await AiContextRenderer.SearchContextAsync("./ai-context", query, database, target, limit, serverAlias, includeDetails, cancellationToken);
                     var resultText = JsonSerializer.Serialize(searchResult, new JsonSerializerOptions { WriteIndented = true });
                     return CreateToolResponse(idNode, resultText, isError: false);
+                }
+                else if (toolName == "get_object_context")
+                {
+                    var args = paramsProp.TryGetProperty("arguments", out var argsProp) ? argsProp : default;
+                    var db = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("database", out var dbProp)
+                        ? dbProp.GetString()
+                        : _options.Database;
+
+                    var name = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("name", out var nProp)
+                        ? nProp.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(db) || string.IsNullOrWhiteSpace(name))
+                    {
+                        Logger.Error("MCP tool 'get_object_context' validation failure: 'database' and 'name' are required.");
+                        return CreateErrorResponse(idNode, -32602, "Parameters 'database' and 'name' are required.");
+                    }
+
+                    var serverAlias = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("server_alias", out var sProp)
+                        ? sProp.GetString()
+                        : _options.ServerAlias;
+
+                    var type = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("type", out var tProp)
+                        ? tProp.GetString()
+                        : null;
+
+                    var contextResult = await AiContextRenderer.GetObjectContextAsync("./ai-context", serverAlias ?? _options.ServerAlias, db, name, type, cancellationToken);
+                    return CreateToolResponse(idNode, contextResult, isError: false);
                 }
                 else
                 {

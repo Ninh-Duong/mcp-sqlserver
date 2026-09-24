@@ -220,6 +220,33 @@ public class AiContextRendererTests
     }
 
     [Fact]
+    public void IndexSchemaItem_WithIncludedColumns_FormatsCorrectly()
+    {
+        var idx = new IndexSchemaItem(
+            Name: "IX_Orders_CustomerId",
+            IsUnique: false,
+            IsPrimaryKey: false,
+            TypeDesc: "NONCLUSTERED",
+            KeyColumns: new[] { "CustomerId", "OrderDate" },
+            IncludedColumns: new[] { "TotalAmount", "Status" },
+            FilterDefinition: "[Status] <> 'DELETED'"
+        );
+
+        var compact = idx.ToCompactString();
+        Assert.Equal("IX_Orders_CustomerId: [Key: CustomerId, OrderDate | Inc: TotalAmount, Status] (WHERE [Status] <> 'DELETED')", compact);
+    }
+
+    [Fact]
+    public void RenderCompactSchema_WhenRowCountUnavailable_OutputsExplicitStatsUnavailable()
+    {
+        var table = new TableSchemaItem("dbo", "Metrics", new[] { new ColumnSchemaItem("Id", "int", false, true, false) }, ApproxRowCount: null);
+        var report = new DatabaseScanReport("TestDb", true, 1, 0, 0, new[] { table }, Array.Empty<ViewSchemaItem>(), Array.Empty<ProcedureSchemaItem>());
+        var md = AiContextRenderer.RenderCompactSchema("DEV", report);
+
+        Assert.Contains("### dbo.Metrics (Stats: unavailable)", md);
+    }
+
+    [Fact]
     public void RenderCompactSchema_RendersFunctionsTriggersIndexesAndConstraints()
     {
         var cols = new List<ColumnSchemaItem>
@@ -368,7 +395,7 @@ public class AiContextRendererTests
         var markdown = AiContextRenderer.RenderCompactSchema("DEV", report);
 
         Assert.Contains("dbo.Orders (~1.3M rows | 450.2 MB) [HIGH VOLUME]", markdown);
-        Assert.Contains("Values: ['1', '2', '3']", markdown);
+        Assert.Contains("Observed sample: ['1', '2', '3'] (may be incomplete)", markdown);
         Assert.Contains("Migration: Latest = `20260924_Init` (5 total)", markdown);
     }
 
@@ -414,6 +441,216 @@ public class AiContextRendererTests
             Assert.Contains("References **`CRM_Tenant`**:", content);
             Assert.Contains("References **`CRM_Master`**:", content);
             Assert.Contains("`CRM_Lead.dbo.GetLeadOverview` -> `CRM_Tenant.dbo.Customer`", content);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RenderAndExportAsync_SingleDbScan_DeletesOrphanRoutineFiles()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_clean_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var dbDir = Path.Combine(tempDir, "servers", "DEV", "databases", "AppDb");
+            var procsDir = Path.Combine(dbDir, "procedures");
+            Directory.CreateDirectory(procsDir);
+            var orphanFile = Path.Combine(procsDir, "dbo.OldDeletedProc.sql");
+            await File.WriteAllTextAsync(orphanFile, "-- Old proc");
+
+            var scanResult = new ServerScanResult(
+                ServerAlias: "DEV",
+                ServerHost: "localhost",
+                ServerVersion: "SQL Server 2022",
+                ScannedAt: DateTime.Now,
+                ElapsedMs: 50,
+                Databases:
+                [
+                    new DatabaseScanReport(
+                        "AppDb",
+                        true,
+                        0, 0, 1,
+                        Array.Empty<TableSchemaItem>(),
+                        Array.Empty<ViewSchemaItem>(),
+                        [new ProcedureSchemaItem("dbo", "NewProc", Array.Empty<string>(), "SELECT 1")]
+                    )
+                ]
+            );
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            Assert.False(File.Exists(orphanFile), "Orphan routine file should have been deleted");
+            Assert.True(File.Exists(Path.Combine(procsDir, "dbo.NewProc.sql")));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RenderAndExportAsync_SingleDbScan_PreservesExistingCrossDbDependenciesOfOtherDbs()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_crossdb_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var serverDir = Path.Combine(tempDir, "servers", "DEV");
+            Directory.CreateDirectory(serverDir);
+            var crossDbPath = Path.Combine(serverDir, "CROSS_DB_DEPENDENCIES.compact.md");
+            await File.WriteAllTextAsync(crossDbPath, "# Cross-Database Dependencies Map: DEV\n\n## Database `ExistingDb`\n- References **`OtherDb`**:\n  - `ExistingDb.dbo.sp_Call` -> `OtherDb.dbo.Target`\n");
+
+            var scanResult = new ServerScanResult(
+                ServerAlias: "DEV",
+                ServerHost: "localhost",
+                ServerVersion: "SQL Server 2022",
+                ScannedAt: DateTime.Now,
+                ElapsedMs: 50,
+                Databases:
+                [
+                    new DatabaseScanReport(
+                        "NewDb",
+                        true,
+                        0, 0, 0,
+                        Array.Empty<TableSchemaItem>(),
+                        Array.Empty<ViewSchemaItem>(),
+                        Array.Empty<ProcedureSchemaItem>(),
+                        CrossDbDependencies: [new CrossDbDependencyItem("dbo.Proc1", "TargetDb", "dbo.TargetTable")]
+                    )
+                ]
+            );
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            var content = await File.ReadAllTextAsync(crossDbPath);
+            Assert.Contains("## Database `ExistingDb`", content);
+            Assert.Contains("## Database `NewDb`", content);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_WithServerFilter_ReturnsOnlyMatchingServer()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_srv_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var resDev = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 1, 0, 0, [new TableSchemaItem("dbo", "Users", [])], [], [])
+            ]);
+            var resProd = new ServerScanResult("PROD", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 1, 0, 0, [new TableSchemaItem("dbo", "Users", [])], [], [])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(resDev, tempDir);
+            await AiContextRenderer.RenderAndExportAsync(resProd, tempDir);
+
+            var searchResult = await AiContextRenderer.SearchContextAsync(tempDir, "Users", serverAlias: "DEV");
+
+            Assert.NotEmpty(searchResult.Matches);
+            Assert.All(searchResult.Matches, m => Assert.Equal("DEV", m.ServerAlias));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_DefaultIncludeDetailsFalse_ReturnsConciseDetails()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_concise_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var res = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 1, 0, 0, [
+                    new TableSchemaItem("dbo", "Users", [
+                        new ColumnSchemaItem("Id", "int", false, true, true),
+                        new ColumnSchemaItem("Email", "nvarchar(100)", false, false, false)
+                    ])
+                ], [], [])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(res, tempDir);
+
+            var searchResult = await AiContextRenderer.SearchContextAsync(tempDir, "Users", includeDetails: false);
+
+            var tableMatch = searchResult.Matches.First(m => m.Type == "table");
+            Assert.Empty(tableMatch.Details);
+
+            var detailedResult = await AiContextRenderer.SearchContextAsync(tempDir, "Users", includeDetails: true);
+            var detailedMatch = detailedResult.Matches.First(m => m.Type == "table");
+            Assert.NotEmpty(detailedMatch.Details);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetObjectContextAsync_Table_ReturnsOnlyTargetTableMarkdown()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_get_obj_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var res = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 2, 0, 0, [
+                    new TableSchemaItem("dbo", "Users", [new ColumnSchemaItem("Id", "int", false, true, true)]),
+                    new TableSchemaItem("dbo", "Orders", [new ColumnSchemaItem("OrderId", "bigint", false, true, true)])
+                ], [], [])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(res, tempDir);
+
+            var tableMd = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "Orders", "table");
+
+            Assert.Contains("### dbo.Orders", tableMd);
+            Assert.Contains("OrderId", tableMd);
+            Assert.DoesNotContain("### dbo.Users", tableMd);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetObjectContextAsync_Procedure_ReturnsSqlContent()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_get_proc_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var res = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 0, 0, 1, [], [], [
+                    new ProcedureSchemaItem("dbo", "sp_GetOrder", ["@Id int"], "SELECT * FROM Orders WHERE Id = @Id")
+                ])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(res, tempDir);
+
+            var sql = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "sp_GetOrder", "procedure");
+
+            Assert.Contains("sp_GetOrder", sql);
+            Assert.Contains("SELECT * FROM Orders", sql);
         }
         finally
         {
