@@ -4,36 +4,6 @@ using Microsoft.Data.Sqlite;
 
 namespace McpSqlServer;
 
-public record ServerRegistryItem(
-    string ServerAlias,
-    string ServerHost,
-    string ServerVersion,
-    int DatabaseCount,
-    int TotalTableCount,
-    int TotalViewCount,
-    int TotalProcedureCount,
-    DateTime LastScannedAt,
-    int TotalFunctionCount = 0,
-    int TotalTriggerCount = 0,
-    IReadOnlyDictionary<string, DatabaseMigrationStatus>? Migrations = null
-);
-
-public record SearchContextMatch(
-    string ServerAlias,
-    string Database,
-    string Type,
-    string Name,
-    string Details,
-    string RelativePath
-);
-
-public record SearchContextResult(
-    string Query,
-    int TotalMatches,
-    IReadOnlyList<SearchContextMatch> Matches,
-    string Message
-);
-
 public class AiContextRenderer
 {
     public static async Task<IReadOnlyList<string>> RenderAndExportAsync(
@@ -376,175 +346,13 @@ public class AiContextRenderer
         return createdFiles;
     }
 
-    public static async Task<string> UpdateCatalogDbAsync(
+    public static Task<string> UpdateCatalogDbAsync(
         string baseDir,
         string serverAlias,
         IEnumerable<DatabaseScanReport> databases,
         CancellationToken cancellationToken = default)
-    {
-        var dbPath = Path.Combine(baseDir, "catalog.db");
-        await using var conn = new SqliteConnection($"Data Source={dbPath}");
-        await conn.OpenAsync(cancellationToken);
+        => AiContextCatalog.UpdateCatalogDbAsync(baseDir, serverAlias, databases, cancellationToken);
 
-        const string initSql = @"
-CREATE TABLE IF NOT EXISTS catalog_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    server_alias TEXT NOT NULL,
-    database_name TEXT NOT NULL,
-    item_type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    details TEXT,
-    relative_path TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_cat_alias_db ON catalog_items(server_alias, database_name);
-CREATE INDEX IF NOT EXISTS idx_cat_server_db_type ON catalog_items(server_alias, database_name, item_type);
-CREATE INDEX IF NOT EXISTS idx_cat_type ON catalog_items(item_type);
-CREATE INDEX IF NOT EXISTS idx_cat_name ON catalog_items(name COLLATE NOCASE);
-";
-        await using (var initCmd = conn.CreateCommand())
-        {
-            initCmd.CommandText = initSql;
-            await initCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        await using var transaction = conn.BeginTransaction();
-
-        foreach (var db in databases)
-        {
-            if (!db.Success) continue;
-
-            // Delete old items for this server & DB
-            await using (var delCmd = conn.CreateCommand())
-            {
-                delCmd.Transaction = transaction;
-                delCmd.CommandText = "DELETE FROM catalog_items WHERE server_alias = @alias AND database_name = @db;";
-                delCmd.Parameters.AddWithValue("@alias", serverAlias);
-                delCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                await delCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            // Insert tables & columns
-            foreach (var t in db.Tables)
-            {
-                var colsSummary = string.Join(", ", t.Columns.Select(c => c.ToQuickMapString()));
-                var volInfo = t.ApproxRowCount.HasValue ? $" (~{t.ApproxRowCount.Value} rows)" : "";
-
-                await using (var insCmd = conn.CreateCommand())
-                {
-                    insCmd.Transaction = transaction;
-                    insCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'table', @name, @details, @path);";
-                    insCmd.Parameters.AddWithValue("@alias", serverAlias);
-                    insCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                    insCmd.Parameters.AddWithValue("@name", t.FullName);
-                    insCmd.Parameters.AddWithValue("@details", $"{colsSummary}{volInfo}");
-                    insCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
-                    await insCmd.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                foreach (var col in t.Columns)
-                {
-                    await using var insColCmd = conn.CreateCommand();
-                    insColCmd.Transaction = transaction;
-                    insColCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'column', @name, @details, @path);";
-                    insColCmd.Parameters.AddWithValue("@alias", serverAlias);
-                    insColCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                    insColCmd.Parameters.AddWithValue("@name", $"{t.FullName}.{col.Name}");
-                    var sampleStr = col.SampleValues != null && col.SampleValues.Count > 0 ? $" | Observed sample: [{string.Join(", ", col.SampleValues)}] (may be incomplete)" : "";
-                    insColCmd.Parameters.AddWithValue("@details", $"{col.DataType} ({(col.IsPrimaryKey ? "PK, " : "")}{(col.IsNullable ? "Null" : "Not Null")}){sampleStr}");
-                    insColCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
-                    await insColCmd.ExecuteNonQueryAsync(cancellationToken);
-                }
-            }
-
-            // Insert views
-            foreach (var v in db.Views)
-            {
-                var fileName = SanitizeFileName($"{v.Schema}.{v.Name}.sql");
-                await using var insViewCmd = conn.CreateCommand();
-                insViewCmd.Transaction = transaction;
-                insViewCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'view', @name, @details, @path);";
-                insViewCmd.Parameters.AddWithValue("@alias", serverAlias);
-                insViewCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                insViewCmd.Parameters.AddWithValue("@name", v.FullName);
-                insViewCmd.Parameters.AddWithValue("@details", $"View in {db.DatabaseName}");
-                insViewCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/views/{fileName}");
-                await insViewCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            // Insert procedures
-            foreach (var p in db.Procedures)
-            {
-                var fileName = SanitizeFileName($"{p.Schema}.{p.Name}.sql");
-                var paramsStr = p.Parameters.Count > 0 ? string.Join(", ", p.Parameters) : "No params";
-                await using var insProcCmd = conn.CreateCommand();
-                insProcCmd.Transaction = transaction;
-                insProcCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'procedure', @name, @details, @path);";
-                insProcCmd.Parameters.AddWithValue("@alias", serverAlias);
-                insProcCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                insProcCmd.Parameters.AddWithValue("@name", p.FullName);
-                insProcCmd.Parameters.AddWithValue("@details", paramsStr);
-                insProcCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/procedures/{fileName}");
-                await insProcCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            // Insert functions
-            foreach (var f in db.Functions)
-            {
-                var fileName = SanitizeFileName($"{f.Schema}.{f.Name}.sql");
-                await using var insFuncCmd = conn.CreateCommand();
-                insFuncCmd.Transaction = transaction;
-                insFuncCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'function', @name, @details, @path);";
-                insFuncCmd.Parameters.AddWithValue("@alias", serverAlias);
-                insFuncCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                insFuncCmd.Parameters.AddWithValue("@name", f.FullName);
-                insFuncCmd.Parameters.AddWithValue("@details", f.TypeDesc);
-                insFuncCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/functions/{fileName}");
-                await insFuncCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            // Insert triggers
-            foreach (var trg in db.Triggers)
-            {
-                var fileName = SanitizeFileName($"{trg.Schema}.{trg.Name}.sql");
-                await using var insTrgCmd = conn.CreateCommand();
-                insTrgCmd.Transaction = transaction;
-                insTrgCmd.CommandText = @"
-INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
-VALUES (@alias, @db, 'trigger', @name, @details, @path);";
-                insTrgCmd.Parameters.AddWithValue("@alias", serverAlias);
-                insTrgCmd.Parameters.AddWithValue("@db", db.DatabaseName);
-                insTrgCmd.Parameters.AddWithValue("@name", trg.FullName);
-                insTrgCmd.Parameters.AddWithValue("@details", $"Trigger on [{trg.TargetTable}] ({trg.Events})");
-                insTrgCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/triggers/{fileName}");
-                await insTrgCmd.ExecuteNonQueryAsync(cancellationToken);
-            }
-        }
-
-        try
-        {
-            await using var syncFts = conn.CreateCommand();
-            syncFts.Transaction = transaction;
-            syncFts.CommandText = "INSERT INTO catalog_fts(catalog_fts) VALUES('rebuild');";
-            await syncFts.ExecuteNonQueryAsync(cancellationToken);
-        }
-        catch
-        {
-            // Ignore if rebuild command unsupported
-        }
-
-        await transaction.CommitAsync(cancellationToken);
-        return dbPath;
-    }
 
     public static string RenderCompactSchema(string serverAlias, DatabaseScanReport db)
     {
@@ -774,7 +582,7 @@ VALUES (@alias, @db, 'trigger', @name, @details, @path);";
         return masterIndexPath;
     }
 
-    public static async Task<SearchContextResult> SearchContextAsync(
+    public static Task<SearchContextResult> SearchContextAsync(
         string baseDirectory,
         string query,
         string? database = null,
@@ -783,173 +591,17 @@ VALUES (@alias, @db, 'trigger', @name, @details, @path);";
         string? serverAlias = null,
         bool includeDetails = false,
         CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "Query string cannot be empty.");
-        }
+        => AiContextCatalog.SearchContextAsync(baseDirectory, query, database, target, limit, serverAlias, includeDetails, cancellationToken);
 
-        var fullBaseDir = Path.GetFullPath(baseDirectory);
-        var catalogPath = Path.Combine(fullBaseDir, "catalog.db");
-        if (!File.Exists(catalogPath))
-        {
-            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "No ai-context catalog found. Please run 'scan_server_context' tool first.");
-        }
-
-        var q = query.Trim();
-        var targetType = string.IsNullOrWhiteSpace(target) ? "all" : target.Trim().ToLowerInvariant();
-        var matches = new List<SearchContextMatch>();
-
-        try
-        {
-            await using var conn = new SqliteConnection($"Data Source={catalogPath}");
-            await conn.OpenAsync(cancellationToken);
-
-            var querySql = @"
-SELECT server_alias, database_name, item_type, name, details, relative_path
-FROM catalog_items
-WHERE (@server IS NULL OR server_alias = @server COLLATE NOCASE)
-  AND (@db IS NULL OR database_name = @db COLLATE NOCASE)
-  AND (
-    @type = 'all' 
-    OR item_type = @type 
-    OR (@type = 'routine' AND item_type IN ('procedure', 'view', 'function', 'trigger'))
-  )
-  AND (name LIKE @pattern ESCAPE '\' OR details LIKE @pattern ESCAPE '\')
-ORDER BY 
-  CASE WHEN name = @exact COLLATE NOCASE THEN 1
-       WHEN name LIKE @prefix COLLATE NOCASE THEN 2
-       ELSE 3 END,
-  item_type, name
-LIMIT @limit;";
-
-            var escapedQ = q.Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");
-            var pattern = $"%{escapedQ}%";
-            var prefix = $"{escapedQ}%";
-
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = querySql;
-                cmd.Parameters.AddWithValue("@server", (object?)serverAlias ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@db", (object?)database ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@type", targetType);
-                cmd.Parameters.AddWithValue("@pattern", pattern);
-                cmd.Parameters.AddWithValue("@prefix", prefix);
-                cmd.Parameters.AddWithValue("@exact", q);
-                cmd.Parameters.AddWithValue("@limit", Math.Clamp(limit, 1, 50));
-
-                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
-                {
-                    matches.Add(new SearchContextMatch(
-                        ServerAlias: reader.GetString(0),
-                        Database: reader.GetString(1),
-                        Type: reader.GetString(2),
-                        Name: reader.GetString(3),
-                        Details: includeDetails && !reader.IsDBNull(4) ? reader.GetString(4) : "",
-                        RelativePath: reader.GetString(5)
-                    ));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            return new SearchContextResult(q, 0, Array.Empty<SearchContextMatch>(), $"Error querying catalog: {ex.Message}");
-        }
-
-        return new SearchContextResult(
-            Query: q,
-            TotalMatches: matches.Count,
-            Matches: matches,
-            Message: matches.Count == 0
-                ? $"No matches found for '{q}'."
-                : $"Found {matches.Count} match(es) for '{q}'."
-        );
-    }
-
-    public static async Task<string> GetObjectContextAsync(
+    public static Task<string> GetObjectContextAsync(
         string baseDirectory,
         string serverAlias,
         string database,
         string objectName,
         string? objectType = null,
         CancellationToken cancellationToken = default)
-    {
-        var fullBaseDir = Path.GetFullPath(baseDirectory);
-        var dbDir = Path.Combine(fullBaseDir, "servers", serverAlias, "databases", database);
-        if (!Directory.Exists(dbDir))
-        {
-            return $"Database '{database}' on server '{serverAlias}' not found in ai-context snapshot.";
-        }
+        => ObjectContextReader.GetObjectContextAsync(baseDirectory, serverAlias, database, objectName, objectType, cancellationToken);
 
-        var normalizedName = objectName.Trim().Trim('[', ']');
-        var pureName = normalizedName.Contains('.') ? normalizedName.Substring(normalizedName.LastIndexOf('.') + 1) : normalizedName;
-        var type = objectType?.Trim().ToLowerInvariant();
-
-        // 1. If table or unspecified, search in schema.compact.md
-        if (type == "table" || string.IsNullOrEmpty(type))
-        {
-            var schemaFile = Path.Combine(dbDir, "schema.compact.md");
-            if (File.Exists(schemaFile))
-            {
-                var lines = await File.ReadAllLinesAsync(schemaFile, cancellationToken);
-                var section = new StringBuilder();
-                bool recording = false;
-                foreach (var line in lines)
-                {
-                    if (line.StartsWith("### ") && (line.Contains($".{pureName} ") || line.EndsWith($".{pureName}") || line.Contains($".{pureName}(")))
-                    {
-                        recording = true;
-                        section.AppendLine(line);
-                        continue;
-                    }
-                    if (recording)
-                    {
-                        if (line.StartsWith("### ") || line.StartsWith("## ")) break;
-                        section.AppendLine(line);
-                    }
-                }
-                if (section.Length > 0) return section.ToString().TrimEnd();
-            }
-        }
-
-        // 2. Check routine SQL files (views, procedures, functions, triggers)
-        var routineFolders = new[] { "procedures", "views", "functions", "triggers" };
-        foreach (var folder in routineFolders)
-        {
-            if (!string.IsNullOrEmpty(type) && !folder.StartsWith(type)) continue;
-
-            var folderPath = Path.Combine(dbDir, folder);
-            if (Directory.Exists(folderPath))
-            {
-                var match = Directory.GetFiles(folderPath, $"*.{pureName}.sql")
-                    .Concat(Directory.GetFiles(folderPath, $"{pureName}.sql"))
-                    .FirstOrDefault();
-
-                if (match != null)
-                {
-                    return await File.ReadAllTextAsync(match, cancellationToken);
-                }
-            }
-        }
-
-        // 3. Check cross-db dependencies
-        if (type == "dependency" || string.IsNullOrEmpty(type))
-        {
-            var crossDbPath = Path.Combine(fullBaseDir, "servers", serverAlias, "CROSS_DB_DEPENDENCIES.compact.md");
-            if (File.Exists(crossDbPath))
-            {
-                var lines = await File.ReadAllLinesAsync(crossDbPath, cancellationToken);
-                var matchingLines = lines.Where(l => l.Contains(pureName, StringComparison.OrdinalIgnoreCase)).ToList();
-                if (matchingLines.Count > 0)
-                {
-                    return $"### Cross-Database Dependencies for '{pureName}':\n" + string.Join("\n", matchingLines);
-                }
-            }
-        }
-
-        return $"Object '{objectName}' not found in ai-context snapshot for {serverAlias}/{database}.";
-    }
 
     private static void CleanupOrphanSqlFiles(string directory, IEnumerable<string> activeFileNames)
     {
@@ -965,7 +617,7 @@ LIMIT @limit;";
         }
     }
 
-    private static string SanitizeFileName(string fileName)
+    internal static string SanitizeFileName(string fileName)
     {
         var invalid = Path.GetInvalidFileNameChars();
         return string.Concat(fileName.Select(c => invalid.Contains(c) ? '_' : c));
