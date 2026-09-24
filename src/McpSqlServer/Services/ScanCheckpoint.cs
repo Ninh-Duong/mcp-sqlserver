@@ -31,6 +31,27 @@ public sealed class ScanCheckpoint
     public DatabaseScanReport? GetReport(string databaseName) =>
         _reports.GetValueOrDefault(databaseName);
 
+    public static string GetCheckpointDirectory(string outputDirectory, string serverAlias, string serverHost)
+    {
+        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{serverAlias.ToUpperInvariant()}\n{serverHost.ToUpperInvariant()}")));
+        return Path.Combine(Path.GetFullPath(outputDirectory), ".scan-state", identity);
+    }
+
+    public static bool HasCheckpoint(string outputDirectory, string serverAlias, string serverHost)
+    {
+        var metadataPath = Path.Combine(GetCheckpointDirectory(outputDirectory, serverAlias, serverHost), "metadata.json");
+        return File.Exists(metadataPath);
+    }
+
+    public static void DeleteCheckpoint(string outputDirectory, string serverAlias, string serverHost)
+    {
+        var directory = GetCheckpointDirectory(outputDirectory, serverAlias, serverHost);
+        if (Directory.Exists(directory))
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { }
+        }
+    }
+
     public static async Task<ScanCheckpoint> OpenAsync(
         string outputDirectory,
         string serverAlias,
@@ -39,8 +60,7 @@ public sealed class ScanCheckpoint
         bool resume,
         CancellationToken cancellationToken = default)
     {
-        var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{serverAlias.ToUpperInvariant()}\n{serverHost.ToUpperInvariant()}")));
-        var directory = Path.Combine(Path.GetFullPath(outputDirectory), ".scan-state", identity);
+        var directory = GetCheckpointDirectory(outputDirectory, serverAlias, serverHost);
         Directory.CreateDirectory(directory);
         var metadataPath = Path.Combine(directory, "metadata.json");
 
