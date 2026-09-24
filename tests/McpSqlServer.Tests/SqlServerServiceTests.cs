@@ -161,6 +161,47 @@ public class SqlServerServiceTests
         );
 
         var compact = col.ToCompactString();
-        Assert.Contains("Values: ['NEW', 'CONTACTED', 'QUALIFIED', 'LOST']", compact);
+        Assert.Contains("Observed sample: ['NEW', 'CONTACTED', 'QUALIFIED', 'LOST'] (may be incomplete)", compact);
+    }
+
+    [Fact]
+    public void CheckSchemaDrift_WhenEfMigrationsMatch_ButLastModifyDateIsNewer_FlagsDrift()
+    {
+        var snapshotDate = new DateTime(2026, 9, 20, 10, 0, 0);
+        var manualDdlDate = new DateTime(2026, 9, 24, 11, 0, 0);
+        var migrationId = "20260920000000_Initial";
+
+        var isDrifted = SqlServerService.EvaluateDatabaseDrift(
+            snapshotMigrationId: migrationId,
+            currentMigrationId: migrationId,
+            snapshotCount: 1,
+            currentCount: 1,
+            snapshotLastModify: snapshotDate,
+            currentLastModify: manualDdlDate,
+            out var driftReason
+        );
+
+        Assert.True(isDrifted);
+        Assert.Contains("DDL Modified", driftReason);
+    }
+
+    [Fact]
+    public void CheckSchemaDrift_WhenMigrationsAndDdlMatch_ReturnsUpToDate()
+    {
+        var now = new DateTime(2026, 9, 24, 10, 0, 0);
+        var migrationId = "20260924000000_Update";
+
+        var isDrifted = SqlServerService.EvaluateDatabaseDrift(
+            snapshotMigrationId: migrationId,
+            currentMigrationId: migrationId,
+            snapshotCount: 2,
+            currentCount: 2,
+            snapshotLastModify: now,
+            currentLastModify: now,
+            out var driftReason
+        );
+
+        Assert.False(isDrifted);
+        Assert.Equal("Up to date", driftReason);
     }
 }

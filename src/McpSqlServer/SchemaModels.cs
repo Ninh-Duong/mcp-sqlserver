@@ -24,7 +24,7 @@ public record ColumnSchemaItem(
         if (SampleValues != null && SampleValues.Count > 0)
         {
             var vals = string.Join(", ", SampleValues.Select(v => $"'{v}'"));
-            attributes.Add($"Values: [{vals}]");
+            attributes.Add($"Observed sample: [{vals}] (may be incomplete)");
         }
 
         return $"- `{Name}`: {DataType} ({string.Join(", ", attributes)})";
@@ -45,13 +45,26 @@ public record IndexSchemaItem(
     bool IsUnique,
     bool IsPrimaryKey,
     string TypeDesc,
-    IReadOnlyList<string> Columns,
+    IReadOnlyList<string> KeyColumns,
+    IReadOnlyList<string>? IncludedColumns = null,
     string? FilterDefinition = null
 )
 {
+    public IndexSchemaItem(string name, bool isUnique, bool isPrimaryKey, string typeDesc, IReadOnlyList<string> keyColumns, string? filterDefinition)
+        : this(name, isUnique, isPrimaryKey, typeDesc, keyColumns, null, filterDefinition)
+    {
+    }
+
+    private readonly IReadOnlyList<string>? _includedColumns = IncludedColumns;
+    public IReadOnlyList<string> IncludedColumns => _includedColumns ?? Array.Empty<string>();
+    public IReadOnlyList<string> Columns => KeyColumns;
+
     public string ToCompactString()
     {
-        var cols = string.Join(", ", Columns);
+        var cols = IncludedColumns.Count > 0
+            ? $"Key: {string.Join(", ", KeyColumns)} | Inc: {string.Join(", ", IncludedColumns)}"
+            : string.Join(", ", KeyColumns);
+
         var flags = new List<string>();
         if (IsPrimaryKey) flags.Add("PK");
         else if (IsUnique) flags.Add("UNIQUE");

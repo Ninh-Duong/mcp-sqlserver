@@ -562,7 +562,7 @@ ORDER BY s.name, t.name, cc.name;";
             }
 
             // 3. Scan Indexes
-            var indexColMap = new Dictionary<string, Dictionary<string, (bool IsUnique, bool IsPk, string TypeDesc, string? FilterDef, List<string> Columns)>>(StringComparer.OrdinalIgnoreCase);
+            var indexColMap = new Dictionary<string, Dictionary<string, (bool IsUnique, bool IsPk, string TypeDesc, string? FilterDef, List<string> KeyColumns, List<string> IncludedColumns)>>(StringComparer.OrdinalIgnoreCase);
             const string queryIndexes = @"
 SELECT 
     s.name AS schema_name,
@@ -572,14 +572,15 @@ SELECT
     i.is_primary_key,
     i.type_desc,
     c.name AS column_name,
-    i.filter_definition
+    i.filter_definition,
+    ic.is_included_column
 FROM sys.indexes i
 INNER JOIN sys.tables t ON i.object_id = t.object_id
 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
 INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
 WHERE i.index_id > 0 AND i.is_hypothetical = 0
-ORDER BY s.name, t.name, i.name, ic.key_ordinal;";
+ORDER BY s.name, t.name, i.name, ic.is_included_column, ic.key_ordinal;";
 
             await using (var cmd = connection.CreateCommand())
             {
@@ -596,20 +597,29 @@ ORDER BY s.name, t.name, i.name, ic.key_ordinal;";
                     var typeDesc = reader.GetString(5);
                     var colName = reader.GetString(6);
                     var filterDef = reader.IsDBNull(7) ? null : reader.GetString(7);
+                    var isIncluded = !reader.IsDBNull(8) && reader.GetBoolean(8);
 
                     var tableKey = $"{schema}.{table}";
                     if (!indexColMap.TryGetValue(tableKey, out var indices))
                     {
-                        indices = new Dictionary<string, (bool, bool, string, string?, List<string>)>(StringComparer.OrdinalIgnoreCase);
+                        indices = new Dictionary<string, (bool, bool, string, string?, List<string>, List<string>)>(StringComparer.OrdinalIgnoreCase);
                         indexColMap[tableKey] = indices;
                     }
 
                     if (!indices.TryGetValue(indexName, out var idxData))
                     {
-                        idxData = (isUnique, isPk, typeDesc, filterDef, new List<string>());
+                        idxData = (isUnique, isPk, typeDesc, filterDef, new List<string>(), new List<string>());
                         indices[indexName] = idxData;
                     }
-                    idxData.Columns.Add(colName);
+
+                    if (isIncluded)
+                    {
+                        idxData.IncludedColumns.Add(colName);
+                    }
+                    else
+                    {
+                        idxData.KeyColumns.Add(colName);
+                    }
                 }
             }
 
@@ -690,7 +700,8 @@ ORDER BY ts.name, t.name, tr.name;";
                             IsUnique: idx.Value.IsUnique,
                             IsPrimaryKey: idx.Value.IsPk,
                             TypeDesc: idx.Value.TypeDesc,
-                            Columns: idx.Value.Columns,
+                            KeyColumns: idx.Value.KeyColumns,
+                            IncludedColumns: idx.Value.IncludedColumns,
                             FilterDefinition: idx.Value.FilterDef
                         ));
                     }
@@ -1131,11 +1142,18 @@ END";
                 }
                 else
                 {
-                    if (!string.Equals(cached.LatestMigrationId, currentMigrationId, StringComparison.OrdinalIgnoreCase) ||
-                        cached.MigrationCount != currentCount)
+                    var hasDrift = EvaluateDatabaseDrift(
+                        cached.LatestMigrationId,
+                        currentMigrationId,
+                        cached.MigrationCount,
+                        currentCount,
+                        cached.LastObjectModifyDate,
+                        currentLastModify,
+                        out var driftReason
+                    );
+
+                    if (hasDrift)
                     {
-                        var diff = currentCount - cached.MigrationCount;
-                        var diffStr = diff > 0 ? $"+{diff} new migrations" : $"{diff} migrations";
                         drifted.Add(new DatabaseDriftInfo(
                             DatabaseName: db.Name,
                             HasDrift: true,
@@ -1143,19 +1161,7 @@ END";
                             CurrentMigrationId: currentMigrationId,
                             SnapshotCount: cached.MigrationCount,
                             CurrentCount: currentCount,
-                            Reason: $"{diffStr} (Latest: {currentMigrationId ?? "none"})"
-                        ));
-                    }
-                    else if (string.IsNullOrEmpty(currentMigrationId) && currentLastModify.HasValue && cached.LastObjectModifyDate.HasValue && currentLastModify > cached.LastObjectModifyDate.Value.AddSeconds(5))
-                    {
-                        drifted.Add(new DatabaseDriftInfo(
-                            DatabaseName: db.Name,
-                            HasDrift: true,
-                            SnapshotMigrationId: null,
-                            CurrentMigrationId: null,
-                            SnapshotCount: 0,
-                            CurrentCount: 0,
-                            Reason: $"Modified: {currentLastModify:yyyy-MM-dd HH:mm}"
+                            Reason: driftReason
                         ));
                     }
                     else
@@ -1179,6 +1185,37 @@ END";
         {
             return new DriftCheckResult(false, alias, drifted, upToDate, ex.Message);
         }
+    }
+
+    public static bool EvaluateDatabaseDrift(
+        string? snapshotMigrationId,
+        string? currentMigrationId,
+        int snapshotCount,
+        int currentCount,
+        DateTime? snapshotLastModify,
+        DateTime? currentLastModify,
+        out string driftReason)
+    {
+        // 1. Check EF migration drift
+        if (!string.Equals(snapshotMigrationId, currentMigrationId, StringComparison.OrdinalIgnoreCase) ||
+            snapshotCount != currentCount)
+        {
+            var diff = currentCount - snapshotCount;
+            var diffStr = diff > 0 ? $"+{diff} new migrations" : $"{diff} migrations";
+            driftReason = $"{diffStr} (Latest: {currentMigrationId ?? "none"})";
+            return true;
+        }
+
+        // 2. Check DDL modification drift for ALL databases (including EF Core databases)
+        if (currentLastModify.HasValue && snapshotLastModify.HasValue &&
+            currentLastModify.Value > snapshotLastModify.Value.AddSeconds(5))
+        {
+            driftReason = $"DDL Modified: {currentLastModify:yyyy-MM-dd HH:mm}";
+            return true;
+        }
+
+        driftReason = "Up to date";
+        return false;
     }
 
     public static (bool IsValid, string? ErrorMessage) ValidateReadOnlyQuery(string sql)

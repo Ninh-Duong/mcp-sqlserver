@@ -160,12 +160,19 @@ public static class PreflightChecker
         try
         {
             var formattedType = SqlServerService.FormatDataType("nvarchar", 100, 0, 0);
-            var col = new ColumnSchemaItem("Username", formattedType, false, true, false, "dbo.Roles.Id");
+            var col = new ColumnSchemaItem("Username", formattedType, false, true, false, "dbo.Roles.Id", SampleValues: ["Admin", "User"]);
             var compactStr = col.ToCompactString();
 
-            if (formattedType != "nvarchar(50)" || !compactStr.Contains("PK") || !compactStr.Contains("FK -> dbo.Roles.Id"))
+            var idx = new IndexSchemaItem("IX_User_Role", false, false, "NONCLUSTERED", ["Username"], ["RoleId"]);
+            var idxStr = idx.ToCompactString();
+
+            if (formattedType != "nvarchar(50)" || !compactStr.Contains("PK") || !compactStr.Contains("FK -> dbo.Roles.Id") || !compactStr.Contains("Observed sample: ['Admin', 'User'] (may be incomplete)"))
             {
                 errors.Add($"SelfTest [AiContext.SchemaFormat] unexpected format: {compactStr}");
+            }
+            else if (!idxStr.Contains("Key: Username") || !idxStr.Contains("Inc: RoleId"))
+            {
+                errors.Add($"SelfTest [AiContext.IndexFormat] unexpected index format: {idxStr}");
             }
             else
             {
