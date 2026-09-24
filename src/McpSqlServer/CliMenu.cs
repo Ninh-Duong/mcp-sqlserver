@@ -330,6 +330,10 @@ public class CliMenu
         Console.Write("Export directory [default: ./ai-context]: ");
         var outDir = Console.ReadLine()?.Trim();
         if (string.IsNullOrEmpty(outDir)) outDir = "./ai-context";
+        Console.Write("Resume unfinished scan from this directory? [y/N]: ");
+        var resumeInput = Console.ReadLine()?.Trim();
+        var resume = resumeInput?.Equals("y", StringComparison.OrdinalIgnoreCase) == true ||
+                     resumeInput?.Equals("yes", StringComparison.OrdinalIgnoreCase) == true;
 
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -342,24 +346,37 @@ public class CliMenu
                 _options,
                 includeSystem: includeSystem,
                 onProgress: msg => Console.WriteLine($" - {msg}"),
-                cancellationToken: cancellationToken
+                cancellationToken: cancellationToken,
+                outputDirectory: outDir,
+                resume: resume
             );
 
             Console.WriteLine();
             Console.WriteLine("Exporting AI Context documentation (Progressive Disclosure)...");
             var createdFiles = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir, cancellationToken);
-
-            _connectionStatus = $"Scanned server {_options.ServerAlias} ({scanResult.Databases.Count} DBs)";
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine();
-            Console.WriteLine("==================================================");
-            Console.WriteLine($"[SUCCESS] Finished scanning Server '{scanResult.ServerAlias}' in {scanResult.ElapsedMs} ms!");
-            Console.WriteLine($" - Total Databases scanned: {scanResult.Databases.Count}");
-            Console.WriteLine($" - Total files created: {createdFiles.Count}");
-            Console.WriteLine($" - Root directory: {Path.GetFullPath(outDir)}");
-            Console.WriteLine($" - Central Index: {Path.Combine(outDir, "INDEX.md")}");
-            Console.WriteLine("==================================================");
-            Console.ResetColor();
+            var failed = scanResult.Databases.Where(db => !db.Success).ToArray();
+            if (failed.Length > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"[PARTIAL] Completed {scanResult.Databases.Count - failed.Length}/{scanResult.Databases.Count} databases.");
+                foreach (var db in failed) Console.WriteLine($" - {db.DatabaseName}: {db.ErrorMessage}");
+                Console.WriteLine("Run menu scan again and choose Resume to scan only these databases.");
+                Console.ResetColor();
+            }
+            else
+            {
+                _connectionStatus = $"Scanned server {_options.ServerAlias} ({scanResult.Databases.Count} DBs)";
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine();
+                Console.WriteLine("==================================================");
+                Console.WriteLine($"[SUCCESS] Finished scanning Server '{scanResult.ServerAlias}' in {scanResult.ElapsedMs} ms!");
+                Console.WriteLine($" - Total Databases scanned: {scanResult.Databases.Count}");
+                Console.WriteLine($" - Total files created: {createdFiles.Count}");
+                Console.WriteLine($" - Root directory: {Path.GetFullPath(outDir)}");
+                Console.WriteLine($" - Central Index: {Path.Combine(outDir, "INDEX.md")}");
+                Console.WriteLine("==================================================");
+                Console.ResetColor();
+            }
         }
         catch (Exception ex)
         {
@@ -458,9 +475,15 @@ public class CliMenu
                         cancellationToken: cancellationToken);
 
                     var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir, cancellationToken);
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"\n[SUCCESS] Re-scan finished in {scanResult.ElapsedMs} ms ({files.Count} files updated)!");
+                    var failed = scanResult.Databases.Where(db => !db.Success).ToArray();
+                    Console.ForegroundColor = failed.Length == 0 ? ConsoleColor.Green : ConsoleColor.Yellow;
+                    if (failed.Length == 0)
+                        Console.WriteLine($"\n[SUCCESS] Re-scan finished in {scanResult.ElapsedMs} ms ({files.Count} files updated)!");
+                    else
+                    {
+                        Console.WriteLine($"\n[PARTIAL] Re-scan completed {scanResult.Databases.Count - failed.Length}/{scanResult.Databases.Count} databases.");
+                        foreach (var db in failed) Console.WriteLine($" - {db.DatabaseName}: {db.ErrorMessage}");
+                    }
                     Console.ResetColor();
                 }
                 catch (Exception ex)

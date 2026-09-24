@@ -70,6 +70,14 @@ dotnet run --project ./src/McpSqlServer -- menu
 dotnet run --project ./src/McpSqlServer -- scan --server-alias DEV --output ./ai-context
 ```
 
+The full scan processes up to four databases concurrently and saves each database report under `./ai-context/.scan-state`. If some databases fail or the process is interrupted, run the same command with `--resume` to scan only the unfinished databases:
+
+```pwsh
+dotnet run --project ./src/McpSqlServer -- scan --server-alias DEV --output ./ai-context --resume
+```
+
+A partial scan lists failed databases and exits with code 2. Use the same server alias, server, and output directory when resuming.
+
 > [!TIP]
 > **Automatic configuration via `dbconfig.json`:**
 > Copy [`dbconfig.example.json`](file:///d:/VisualStudioCode/mcp-sqlserver/dbconfig.example.json) to `dbconfig.json` in the project root:

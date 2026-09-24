@@ -74,6 +74,11 @@ public static class McpToolDefinitions
                         {
                             ["type"] = "boolean",
                             ["description"] = "Whether to scan system databases (master, msdb, etc.) (default: false)."
+                        },
+                        ["resume"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["description"] = "Resume the previous full scan and scan only databases that did not complete (default: false). Use the same output_directory."
                         }
                     }
                 }

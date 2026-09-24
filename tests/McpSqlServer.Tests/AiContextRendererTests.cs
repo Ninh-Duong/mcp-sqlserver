@@ -2,6 +2,32 @@ namespace McpSqlServer.Tests;
 
 public class AiContextRendererTests
 {
+    [Fact]
+    public async Task FailedScan_PreservesPriorCrossDatabaseDependencySection()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "mcp_scan_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var success = new DatabaseScanReport("One", true, 0, 0, 0, [], [], [],
+                CrossDbDependencies: [new CrossDbDependencyItem("dbo.View", "Two", "dbo.Table")]);
+            await AiContextRenderer.RenderAndExportAsync(new ServerScanResult("DEV", "sql.local", "SQL", DateTime.Now, 1, [success]), directory);
+            var failed = new DatabaseScanReport("One", false, 0, 0, 0, [], [], [], "timeout");
+
+            await AiContextRenderer.RenderAndExportAsync(new ServerScanResult("DEV", "sql.local", "SQL", DateTime.Now, 1, [failed]), directory);
+
+            var crossDb = await File.ReadAllTextAsync(Path.Combine(directory, "servers", "DEV", "CROSS_DB_DEPENDENCIES.compact.md"));
+            Assert.Contains("## Database `One`", crossDb);
+            Assert.Contains("dbo.View", crossDb);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+            }
+        }
+    }
+
     [Theory]
     [InlineData("nvarchar", 100, 0, 0, "nvarchar(50)")]
     [InlineData("nvarchar", -1, 0, 0, "nvarchar(max)")]

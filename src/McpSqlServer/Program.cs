@@ -51,6 +51,7 @@ public class Program
                 var options = ConnectionOptions.FromConfigOrEnvironment();
                 string outputDir = "./ai-context";
                 bool includeSystem = false;
+                bool resume = false;
 
                 for (int i = 1; i < args.Length; i++)
                 {
@@ -66,6 +67,10 @@ public class Program
                     else if (arg == "--include-system")
                     {
                         includeSystem = true;
+                    }
+                    else if (arg == "--resume")
+                    {
+                        resume = true;
                     }
                 }
 
@@ -83,11 +88,21 @@ public class Program
                     options,
                     includeSystem: includeSystem,
                     onProgress: msg => Console.WriteLine($" - {msg}"),
-                    cancellationToken: cts.Token
+                    cancellationToken: cts.Token,
+                    outputDirectory: outputDir,
+                    resume: resume
                 );
 
                 Console.WriteLine("Rendering AI Context documentation...");
                 var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outputDir, cts.Token);
+                var failed = scanResult.Databases.Where(db => !db.Success).ToArray();
+                if (failed.Length > 0)
+                {
+                    Console.Error.WriteLine($"[PARTIAL] Completed {scanResult.Databases.Count - failed.Length}/{scanResult.Databases.Count} databases; generated {files.Count} files.");
+                    foreach (var db in failed) Console.Error.WriteLine($" - {db.DatabaseName}: {db.ErrorMessage}");
+                    Console.Error.WriteLine("Run again with --resume and the same --output to scan only these databases.");
+                    return 2;
+                }
                 Console.WriteLine($"[SUCCESS] Successfully generated {files.Count} files in '{Path.GetFullPath(outputDir)}'.");
             }
             else
@@ -99,11 +114,12 @@ public class Program
         }
         catch (OperationCanceledException)
         {
-            return 0;
+            return 130;
         }
         catch (Exception ex)
         {
             Logger.Error("Process terminated due to an unhandled exception", ex);
+            Console.Error.WriteLine($"[ERROR] {Logger.Sanitize(ex.Message)}");
             return 1;
         }
     }

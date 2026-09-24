@@ -148,6 +148,7 @@ public class McpServerHandler
                     var alias = args.GetString("server_alias", _options.ServerAlias);
                     var outDir = args.GetString("output_directory", "./ai-context") ?? "./ai-context";
                     var includeSystem = args.GetBool("include_system", false);
+                    var resume = args.GetBool("resume", false);
                     var targetDb = args.GetString("database");
 
                     var scanOptions = new ConnectionOptions
@@ -164,8 +165,9 @@ public class McpServerHandler
                         QueryTimeout = _options.QueryTimeout
                     };
 
-                    var scanResult = await _sqlService.ScanServerAsync(scanOptions, includeSystem: includeSystem, targetDatabase: targetDb, cancellationToken: cancellationToken);
+                    var scanResult = await _sqlService.ScanServerAsync(scanOptions, includeSystem: includeSystem, targetDatabase: targetDb, cancellationToken: cancellationToken, outputDirectory: outDir, resume: resume);
                     var files = await AiContextRenderer.RenderAndExportAsync(scanResult, outDir, cancellationToken);
+                    var failed = scanResult.Databases.Where(db => !db.Success).Select(db => new { database = db.DatabaseName, error = db.ErrorMessage }).ToArray();
 
                     var responseObj = new
                     {
@@ -175,11 +177,14 @@ public class McpServerHandler
                         files_created_count = files.Count,
                         index_file = Path.Combine(outDir, "INDEX.md"),
                         output_directory = Path.GetFullPath(outDir),
-                        elapsed_ms = scanResult.ElapsedMs
+                        elapsed_ms = scanResult.ElapsedMs,
+                        status = failed.Length == 0 ? "complete" : "partial",
+                        failed_databases = failed,
+                        resume_hint = failed.Length == 0 ? null : "Run scan_server_context again with resume=true and the same output_directory."
                     };
 
                     var resultText = JsonSerializer.Serialize(responseObj, new JsonSerializerOptions { WriteIndented = true });
-                    return CreateToolResponse(idNode, resultText, isError: false);
+                    return CreateToolResponse(idNode, resultText, isError: failed.Length > 0);
                 }
                 else if (toolName == "check_schema_drift")
                 {

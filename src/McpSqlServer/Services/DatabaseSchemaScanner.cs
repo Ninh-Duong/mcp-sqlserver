@@ -113,6 +113,10 @@ END";
                     lastObjectModifyDate = migReader.IsDBNull(2) ? null : migReader.GetDateTime(2);
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 Logger.Warning($"Could not fetch migration history for '{dbName}': {ex.Message}");
@@ -146,6 +150,10 @@ GROUP BY s.name, t.name;";
                     var pSizeMb = partReader.GetDouble(3);
                     partitionStats[$"{pSchema}.{pTable}"] = (pRowCount, pSizeMb);
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -254,6 +262,10 @@ ORDER BY s.name, t.name, c.column_id;";
                         {
                             entry.Columns[c] = col with { SampleValues = sampleList };
                         }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch
                     {
@@ -602,6 +614,10 @@ ORDER BY referencing_entity, referenced_database_name;";
                     crossDbDeps.Add(new CrossDbDependencyItem(referencing, refDb, referenced));
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 Logger.Warning($"Could not fetch cross-database dependencies for '{dbName}': {ex.Message}");
@@ -628,6 +644,10 @@ ORDER BY referencing_entity, referenced_database_name;";
                 LastObjectModifyDate: lastObjectModifyDate,
                 CrossDbDependencies: crossDbDeps
             );
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (SqlException ex)
         {
@@ -700,8 +720,12 @@ ORDER BY pm.object_id, pm.parameter_id;";
         bool includeSystem = false,
         Action<string>? onProgress = null,
         string? targetDatabase = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? outputDirectory = null,
+        bool resume = false)
     {
+        if (resume && (outputDirectory == null || targetDatabase != null))
+            throw new InvalidOperationException("Resume requires a full-server scan and an output directory.");
         var sw = Stopwatch.StartNew();
         var alias = string.IsNullOrWhiteSpace(options.ServerAlias) ? "DEV" : options.ServerAlias.Trim();
 
@@ -742,16 +766,26 @@ ORDER BY pm.object_id, pm.parameter_id;";
 
         onProgress?.Invoke($"Found {candidateDbs.Count} databases ready to scan (Include system: {includeSystem}).");
 
-        var reports = new List<DatabaseScanReport>();
-        for (int i = 0; i < candidateDbs.Count; i++)
+        var names = candidateDbs.Select(db => db.Name).ToArray();
+        ScanCheckpoint? checkpoint = null;
+        if (outputDirectory != null && targetDatabase == null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var db = candidateDbs[i];
-            onProgress?.Invoke($"[{i + 1}/{candidateDbs.Count}] Scanning database '{db.Name}'...");
-
-            var report = await ScanDatabaseSchemaAsync(options, db.Name, cancellationToken);
-            reports.Add(report);
+            checkpoint = await ScanCheckpoint.OpenAsync(outputDirectory, alias, options.Server, names, resume, cancellationToken);
+            if (resume)
+                onProgress?.Invoke($"Resuming: {checkpoint.GetCompletedReports().Count} cached reports, {checkpoint.PendingDatabases.Count} databases to scan.");
         }
+
+        var pending = checkpoint?.PendingDatabases ?? names;
+        var freshReports = await ScanReportsAsync(pending, async (name, token) =>
+        {
+            var report = await ScanDatabaseSchemaAsync(options, name, token);
+            if (checkpoint != null) await checkpoint.SaveReportAsync(report, token);
+            return report;
+        }, 4, onProgress, cancellationToken);
+        var freshByName = freshReports.ToDictionary(report => report.DatabaseName, StringComparer.OrdinalIgnoreCase);
+        var reports = names.Select(name => freshByName.TryGetValue(name, out var report)
+            ? report
+            : checkpoint?.GetReport(name) ?? throw new InvalidOperationException($"Missing scan report for '{name}'.")).ToArray();
 
         sw.Stop();
         return new ServerScanResult(
@@ -762,5 +796,25 @@ ORDER BY pm.object_id, pm.parameter_id;";
             ElapsedMs: sw.ElapsedMilliseconds,
             Databases: reports
         );
+    }
+
+    public static async Task<DatabaseScanReport[]> ScanReportsAsync(
+        IReadOnlyList<string> databaseNames,
+        Func<string, CancellationToken, Task<DatabaseScanReport>> scan,
+        int maxConcurrency = 4,
+        Action<string>? onProgress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var reports = new DatabaseScanReport[databaseNames.Count];
+        var progressLock = new object();
+        await Parallel.ForEachAsync(Enumerable.Range(0, databaseNames.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency, CancellationToken = cancellationToken },
+            async (index, token) =>
+            {
+                var name = databaseNames[index];
+                lock (progressLock) onProgress?.Invoke($"[{index + 1}/{databaseNames.Count}] Scanning database '{name}'...");
+                reports[index] = await scan(name, token);
+            });
+        return reports;
     }
 }
