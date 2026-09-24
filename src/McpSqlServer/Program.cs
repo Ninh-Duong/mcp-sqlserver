@@ -52,6 +52,7 @@ public class Program
                 string outputDir = "./ai-context";
                 bool includeSystem = false;
                 bool resume = false;
+                string? targetDatabase = null;
 
                 for (int i = 1; i < args.Length; i++)
                 {
@@ -59,6 +60,10 @@ public class Program
                     if ((arg == "--server-alias" || arg == "--alias" || arg == "--server-name") && i + 1 < args.Length)
                     {
                         options.ServerAlias = args[++i].Trim().ToUpperInvariant();
+                    }
+                    else if ((arg == "--database" || arg == "-d" || arg == "--db") && i + 1 < args.Length)
+                    {
+                        targetDatabase = args[++i].Trim();
                     }
                     else if ((arg == "--output" || arg == "-o") && i + 1 < args.Length)
                     {
@@ -82,12 +87,13 @@ public class Program
                     return 1;
                 }
 
-                Console.WriteLine($"[SCAN] Starting server scan for [{options.ServerAlias}] ({options.Server})...");
+                Console.WriteLine($"[SCAN] Starting server scan for [{options.ServerAlias}] ({options.Server}){(targetDatabase != null ? $" [DB: {targetDatabase}]" : "")}...");
                 var sqlService = new SqlServerService();
                 var scanResult = await sqlService.ScanServerAsync(
                     options,
                     includeSystem: includeSystem,
                     onProgress: msg => Console.WriteLine($" - {msg}"),
+                    targetDatabase: targetDatabase,
                     cancellationToken: cts.Token,
                     outputDirectory: outputDir,
                     resume: resume

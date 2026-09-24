@@ -23,9 +23,22 @@ public static class ObjectContextReader
         var pureName = normalizedName.Contains('.') ? normalizedName.Substring(normalizedName.LastIndexOf('.') + 1) : normalizedName;
         var type = objectType?.Trim().ToLowerInvariant();
 
-        // 1. If table or unspecified, search in schema.compact.md
+        // 1. If table or unspecified, check individual table files first, then fallback to schema.compact.md
         if (type == "table" || string.IsNullOrEmpty(type))
         {
+            var tablesDir = Path.Combine(dbDir, "tables");
+            if (Directory.Exists(tablesDir))
+            {
+                var tableMatch = Directory.GetFiles(tablesDir, $"*.{pureName}.compact.md")
+                    .Concat(Directory.GetFiles(tablesDir, $"{pureName}.compact.md"))
+                    .FirstOrDefault();
+
+                if (tableMatch != null)
+                {
+                    return await File.ReadAllTextAsync(tableMatch, cancellationToken);
+                }
+            }
+
             var schemaFile = Path.Combine(dbDir, "schema.compact.md");
             if (File.Exists(schemaFile))
             {
@@ -70,9 +83,20 @@ public static class ObjectContextReader
             }
         }
 
-        // 3. Check cross-db dependencies
+        // 3. Check cross-db dependencies (check local DB dependencies first, then server-wide)
         if (type == "dependency" || string.IsNullOrEmpty(type))
         {
+            var localDepPath = Path.Combine(dbDir, "dependencies.compact.md");
+            if (File.Exists(localDepPath))
+            {
+                var lines = await File.ReadAllLinesAsync(localDepPath, cancellationToken);
+                var matchingLines = lines.Where(l => l.Contains(pureName, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (matchingLines.Count > 0)
+                {
+                    return $"### Cross-Database Dependencies for '{pureName}':\n" + string.Join("\n", matchingLines);
+                }
+            }
+
             var crossDbPath = Path.Combine(fullBaseDir, "servers", serverAlias, "CROSS_DB_DEPENDENCIES.compact.md");
             if (File.Exists(crossDbPath))
             {

@@ -686,4 +686,166 @@ public class AiContextRendererTests
             }
         }
     }
+
+    [Fact]
+    public async Task RenderAndExportAsync_LargeTableCount_PartitionsIntoIndividualTableFiles()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_mod_tbl_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var tables = Enumerable.Range(1, 55).Select(i =>
+                new TableSchemaItem("dbo", $"Table{i}", [new ColumnSchemaItem("Id", "int", false, true, true)], ApproxRowCount: 1000 * i)
+            ).ToList();
+
+            var scanResult = new ServerScanResult("DEV", "localhost", "SQL 2022", DateTime.Now, 10, [
+                new DatabaseScanReport("LargeDb", true, tables.Count, 0, 0, tables, [], [])
+            ]);
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            // 1. Verify tables directory was created
+            var tablesDir = Path.Combine(tempDir, "servers", "DEV", "databases", "LargeDb", "tables");
+            Assert.True(Directory.Exists(tablesDir));
+
+            // 2. Verify individual table compact files exist
+            var table1File = Path.Combine(tablesDir, "dbo.Table1.compact.md");
+            Assert.True(File.Exists(table1File));
+            var table1Content = await File.ReadAllTextAsync(table1File);
+            Assert.Contains("# Table: dbo.Table1", table1Content);
+            Assert.Contains("`Id`: int (PK, Identity, Not Null)", table1Content);
+
+            // 3. Verify schema.compact.md has modular notice and table skeleton
+            var schemaFile = Path.Combine(tempDir, "servers", "DEV", "databases", "LargeDb", "schema.compact.md");
+            var schemaContent = await File.ReadAllTextAsync(schemaFile);
+            Assert.Contains("Modular Schema Notice", schemaContent);
+            Assert.Contains("`dbo.Table1`", schemaContent);
+            Assert.Contains("./tables/dbo.Table1.compact.md", schemaContent);
+
+            // 4. Verify GetObjectContextAsync resolves table directly from tables directory
+            var table50Md = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "LargeDb", "Table50", "table");
+            Assert.Contains("### dbo.Table50", table50Md);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RenderAndExportAsync_ExportsLocalDependenciesAndCrossDbGraph()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_graph_test_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var deps = new List<CrossDbDependencyItem>
+            {
+                new("dbo.sp_ProcessOrder", "CRM_Billing", "dbo.Invoices"),
+                new("dbo.vw_UserOrders", "CRM_Identity", "dbo.Users")
+            };
+
+            var scanResult = new ServerScanResult("DEV", "localhost", "SQL 2022", DateTime.Now, 10, [
+                new DatabaseScanReport("CRM_Order", true, 0, 1, 1, [], [], [], CrossDbDependencies: deps)
+            ]);
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            // 1. Verify local dependencies.compact.md
+            var localDepFile = Path.Combine(tempDir, "servers", "DEV", "databases", "CRM_Order", "dependencies.compact.md");
+            Assert.True(File.Exists(localDepFile));
+            var localContent = await File.ReadAllTextAsync(localDepFile);
+            Assert.Contains("## References **`CRM_Billing`**", localContent);
+            Assert.Contains("## References **`CRM_Identity`**", localContent);
+
+            // 2. Verify server-level CROSS_DB_GRAPH.compact.md
+            var graphFile = Path.Combine(tempDir, "servers", "DEV", "CROSS_DB_GRAPH.compact.md");
+            Assert.True(File.Exists(graphFile));
+            var graphContent = await File.ReadAllTextAsync(graphFile);
+            Assert.Contains("| **`CRM_Order`** | `CRM_Billing` | 1 |", graphContent);
+            Assert.Contains("| **`CRM_Order`** | `CRM_Identity` | 1 |", graphContent);
+
+            // 3. Verify GetObjectContextAsync finds dependency from local dependencies.compact.md
+            var depCtx = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "CRM_Order", "sp_ProcessOrder", "dependency");
+            Assert.Contains("sp_ProcessOrder", depCtx);
+            Assert.Contains("CRM_Billing", depCtx);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task RenderAndExportAsync_FiltersSystemDatabasesAndHashTablesFromRouter()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_router_filter_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var scanResult = new ServerScanResult("DEV", "localhost", "SQL 2022", DateTime.Now, 10, [
+                new DatabaseScanReport("CRM_Core", true, 2, 0, 0, [
+                    new TableSchemaItem("dbo", "ValidTable", [new ColumnSchemaItem("Id", "int", false, true, true)]),
+                    new TableSchemaItem("dbo", "#TempHash", [new ColumnSchemaItem("Id", "int", false, true, true)])
+                ], [], []),
+                new DatabaseScanReport("tempdb", true, 1, 0, 0, [
+                    new TableSchemaItem("dbo", "#A072FA71", [new ColumnSchemaItem("Id", "int", false, true, true)])
+                ], [], []),
+                new DatabaseScanReport("master", true, 1, 0, 0, [
+                    new TableSchemaItem("dbo", "spt_fallback", [new ColumnSchemaItem("Id", "int", false, true, true)])
+                ], [], [])
+            ]);
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            var routerPath = Path.Combine(tempDir, "servers", "DEV", "TABLES_ROUTER.compact.md");
+            var routerContent = await File.ReadAllTextAsync(routerPath);
+
+            Assert.Contains("- **`CRM_Core`**: ValidTable", routerContent);
+            Assert.DoesNotContain("#TempHash", routerContent);
+            Assert.DoesNotContain("`tempdb`", routerContent);
+            Assert.DoesNotContain("`master`", routerContent);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_FindsCrossDbDependencies()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_dep_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var deps = new List<CrossDbDependencyItem>
+            {
+                new("dbo.sp_ProcessInvoice", "CRM_Finance", "dbo.Accounts")
+            };
+
+            var scanResult = new ServerScanResult("DEV", "localhost", "SQL 2022", DateTime.Now, 10, [
+                new DatabaseScanReport("CRM_Billing", true, 0, 0, 1, [], [], [], CrossDbDependencies: deps)
+            ]);
+
+            await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
+
+            var searchResult = await AiContextRenderer.SearchContextAsync(tempDir, "Accounts", target: "dependency");
+            Assert.True(searchResult.TotalMatches > 0);
+            Assert.Equal("dependency", searchResult.Matches[0].Type);
+            Assert.Contains("CRM_Finance.dbo.Accounts", searchResult.Matches[0].Name);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
 }
