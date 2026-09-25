@@ -133,7 +133,7 @@ SELECT
 FROM sys.dm_db_partition_stats p
 JOIN sys.tables t ON p.object_id = t.object_id
 JOIN sys.schemas s ON t.schema_id = s.schema_id
-WHERE p.index_id IN (0, 1)
+WHERE p.index_id IN (0, 1) AND t.is_ms_shipped = 0 AND t.name <> 'sysdiagrams'
 GROUP BY s.name, t.name;";
 
             try
@@ -163,7 +163,7 @@ GROUP BY s.name, t.name;";
             // 1. Scan Tables & Columns
             var tableDict = new Dictionary<string, (string Schema, string Name, List<ColumnSchemaItem> Columns)>();
             const string queryTablesAndColumns = @"
-SELECT
+SELECT 
     s.name AS schema_name,
     t.name AS table_name,
     c.name AS column_name,
@@ -199,6 +199,7 @@ LEFT JOIN (
 ) fk ON t.object_id = fk.parent_object_id AND c.column_id = fk.parent_column_id
 LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
 LEFT JOIN sys.extended_properties ep ON t.object_id = ep.major_id AND c.column_id = ep.minor_id AND ep.name = 'MS_Description'
+WHERE t.is_ms_shipped = 0 AND t.name <> 'sysdiagrams'
 ORDER BY s.name, t.name, c.column_id;";
 
             await using (var cmd = connection.CreateCommand())
@@ -480,6 +481,7 @@ SELECT
 FROM sys.views v
 INNER JOIN sys.schemas s ON v.schema_id = s.schema_id
 LEFT JOIN sys.sql_modules m ON v.object_id = m.object_id
+WHERE v.is_ms_shipped = 0
 ORDER BY s.name, v.name;";
 
             await using (var cmd = connection.CreateCommand())
@@ -508,7 +510,9 @@ SELECT
 FROM sys.objects o
 INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
 LEFT JOIN sys.sql_modules m ON o.object_id = m.object_id
-WHERE o.type IN ('FN', 'IF', 'TF') AND o.is_ms_shipped = 0
+WHERE o.type IN ('FN', 'IF', 'TF') 
+  AND o.is_ms_shipped = 0
+  AND o.name NOT IN ('fn_diagramobjects')
 ORDER BY s.name, o.name;";
 
             await using (var cmd = connection.CreateCommand())
@@ -555,6 +559,16 @@ FROM sys.procedures p
 INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
 LEFT JOIN sys.sql_modules m ON p.object_id = m.object_id
 WHERE p.is_ms_shipped = 0
+  AND p.name NOT IN (
+    'sp_WhoIsActive',
+    'sp_alterdiagram',
+    'sp_creatediagram',
+    'sp_dropdiagram',
+    'sp_helpdiagramdefinition',
+    'sp_helpdiagrams',
+    'sp_renamediagram',
+    'sp_upgraddiagrams'
+  )
 ORDER BY s.name, p.name;";
 
             await using (var cmd = connection.CreateCommand())

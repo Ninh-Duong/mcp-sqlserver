@@ -15,9 +15,13 @@ public class AiContextRendererTests
 
             await AiContextRenderer.RenderAndExportAsync(new ServerScanResult("DEV", "sql.local", "SQL", DateTime.Now, 1, [failed]), directory);
 
-            var crossDb = await File.ReadAllTextAsync(Path.Combine(directory, "servers", "DEV", "CROSS_DB_DEPENDENCIES.compact.md"));
-            Assert.Contains("## Database `One`", crossDb);
-            Assert.Contains("dbo.View", crossDb);
+            var dbDep = await File.ReadAllTextAsync(Path.Combine(directory, "servers", "DEV", "databases", "One", "dependencies.compact.md"));
+            Assert.Contains("## References **`Two`**", dbDep);
+            Assert.Contains("dbo.View", dbDep);
+
+            var crossDbGraph = await File.ReadAllTextAsync(Path.Combine(directory, "servers", "DEV", "CROSS_DB_GRAPH.compact.md"));
+            Assert.Contains("`One`", crossDbGraph);
+            Assert.Contains("`Two`", crossDbGraph);
         }
         finally
         {
@@ -461,12 +465,18 @@ public class AiContextRendererTests
 
             await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
 
-            var crossDbPath = Path.Combine(tempDir, "servers", "DEV", "CROSS_DB_DEPENDENCIES.compact.md");
-            Assert.True(File.Exists(crossDbPath));
-            var content = await File.ReadAllTextAsync(crossDbPath);
-            Assert.Contains("References **`CRM_Tenant`**:", content);
-            Assert.Contains("References **`CRM_Master`**:", content);
+            var dbDepPath = Path.Combine(tempDir, "servers", "DEV", "databases", "CRM_Lead", "dependencies.compact.md");
+            Assert.True(File.Exists(dbDepPath));
+            var content = await File.ReadAllTextAsync(dbDepPath);
+            Assert.Contains("## References **`CRM_Tenant`**", content);
+            Assert.Contains("## References **`CRM_Master`**", content);
             Assert.Contains("`CRM_Lead.dbo.GetLeadOverview` -> `CRM_Tenant.dbo.Customer`", content);
+
+            var crossDbGraphPath = Path.Combine(tempDir, "servers", "DEV", "CROSS_DB_GRAPH.compact.md");
+            Assert.True(File.Exists(crossDbGraphPath));
+            var graphContent = await File.ReadAllTextAsync(crossDbGraphPath);
+            Assert.Contains("`CRM_Tenant`", graphContent);
+            Assert.Contains("`CRM_Master`", graphContent);
         }
         finally
         {
@@ -530,8 +540,10 @@ public class AiContextRendererTests
         {
             var serverDir = Path.Combine(tempDir, "servers", "DEV");
             Directory.CreateDirectory(serverDir);
-            var crossDbPath = Path.Combine(serverDir, "CROSS_DB_DEPENDENCIES.compact.md");
-            await File.WriteAllTextAsync(crossDbPath, "# Cross-Database Dependencies Map: DEV\n\n## Database `ExistingDb`\n- References **`OtherDb`**:\n  - `ExistingDb.dbo.sp_Call` -> `OtherDb.dbo.Target`\n");
+            var existingDbDir = Path.Combine(serverDir, "databases", "ExistingDb");
+            Directory.CreateDirectory(existingDbDir);
+            await File.WriteAllTextAsync(Path.Combine(existingDbDir, "dependencies.compact.md"),
+                "# Database Dependencies: ExistingDb\n\n## References **`OtherDb`**\n- `ExistingDb.dbo.sp_Call` -> `OtherDb.dbo.Target`\n");
 
             var scanResult = new ServerScanResult(
                 ServerAlias: "DEV",
@@ -555,9 +567,12 @@ public class AiContextRendererTests
 
             await AiContextRenderer.RenderAndExportAsync(scanResult, tempDir);
 
-            var content = await File.ReadAllTextAsync(crossDbPath);
-            Assert.Contains("## Database `ExistingDb`", content);
-            Assert.Contains("## Database `NewDb`", content);
+            var crossDbGraphPath = Path.Combine(serverDir, "CROSS_DB_GRAPH.compact.md");
+            var content = await File.ReadAllTextAsync(crossDbGraphPath);
+            Assert.Contains("`ExistingDb`", content);
+            Assert.Contains("`OtherDb`", content);
+            Assert.Contains("`NewDb`", content);
+            Assert.Contains("`TargetDb`", content);
         }
         finally
         {
