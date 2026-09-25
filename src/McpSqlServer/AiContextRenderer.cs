@@ -243,91 +243,12 @@ public class AiContextRenderer
         await File.WriteAllTextAsync(routerPath, routerSb.ToString(), Encoding.UTF8, cancellationToken);
         createdFiles.Add(routerPath);
 
-        // 4. Write / Merge Cross-Database Dependencies Map
-        var crossDbPath = Path.Combine(serverDir, "CROSS_DB_DEPENDENCIES.compact.md");
-        var existingDbSections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        if (File.Exists(crossDbPath))
+        // 4. Clean up legacy monolithic CROSS_DB_DEPENDENCIES.compact.md
+        var legacyCrossDbPath = Path.Combine(serverDir, "CROSS_DB_DEPENDENCIES.compact.md");
+        if (File.Exists(legacyCrossDbPath))
         {
-            var existingLines = await File.ReadAllLinesAsync(crossDbPath, cancellationToken);
-            string? currentDb = null;
-            var currentSection = new StringBuilder();
-
-            foreach (var line in existingLines)
-            {
-                if (line.StartsWith("## Database `") && line.EndsWith("`"))
-                {
-                    if (currentDb != null && currentSection.Length > 0)
-                    {
-                        existingDbSections[currentDb] = currentSection.ToString().Trim();
-                    }
-                    currentDb = line.Substring(13, line.Length - 14);
-                    currentSection.Clear();
-                    currentSection.AppendLine(line);
-                }
-                else if (currentDb != null)
-                {
-                    currentSection.AppendLine(line);
-                }
-            }
-            if (currentDb != null && currentSection.Length > 0)
-            {
-                existingDbSections[currentDb] = currentSection.ToString().Trim();
-            }
+            try { File.Delete(legacyCrossDbPath); } catch { }
         }
-
-        // Update or remove sections for the scanned databases
-        foreach (var db in scanResult.Databases)
-        {
-            if (!db.Success) continue;
-            var validCrossDb = db.CrossDbDependencies
-                .Where(d => !string.IsNullOrWhiteSpace(d.ReferencedDatabase) && !d.ReferencedDatabase.Equals(db.DatabaseName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (validCrossDb.Count > 0)
-            {
-                var dbSb = new StringBuilder();
-                dbSb.AppendLine($"## Database `{db.DatabaseName}`");
-                var grouped = validCrossDb.GroupBy(d => d.ReferencedDatabase, StringComparer.OrdinalIgnoreCase);
-                foreach (var grp in grouped)
-                {
-                    dbSb.AppendLine($"- References **`{grp.Key}`**:");
-                    foreach (var item in grp)
-                    {
-                        dbSb.AppendLine($"  - `{db.DatabaseName}.{item.ReferencingEntity}` -> `{grp.Key}.{item.ReferencedEntity}`");
-                    }
-                }
-                existingDbSections[db.DatabaseName] = dbSb.ToString().Trim();
-            }
-            else
-            {
-                existingDbSections.Remove(db.DatabaseName);
-            }
-        }
-
-        var crossDbSb = new StringBuilder();
-        crossDbSb.AppendLine($"# Cross-Database Dependencies Map: {scanResult.ServerAlias}");
-        crossDbSb.AppendLine();
-        crossDbSb.AppendLine("> Inter-database references found in stored procedures, views, and functions.");
-        crossDbSb.AppendLine($"> Last updated: {scanResult.ScannedAt:yyyy-MM-dd HH:mm:ss}");
-        crossDbSb.AppendLine();
-
-        if (existingDbSections.Count > 0)
-        {
-            foreach (var kv in existingDbSections.OrderBy(k => k.Key))
-            {
-                crossDbSb.AppendLine(kv.Value);
-                crossDbSb.AppendLine();
-            }
-        }
-        else
-        {
-            crossDbSb.AppendLine("*(No cross-database dependencies detected)*");
-            crossDbSb.AppendLine();
-        }
-
-        await File.WriteAllTextAsync(crossDbPath, crossDbSb.ToString(), Encoding.UTF8, cancellationToken);
-        createdFiles.Add(crossDbPath);
 
         // 4b. Write Cross-Database Graph (High-Level Summary Matrix ~3KB)
         var crossDbGraphPath = Path.Combine(serverDir, "CROSS_DB_GRAPH.compact.md");
@@ -342,37 +263,44 @@ public class AiContextRenderer
         graphSb.AppendLine("|:---|:---|:---:|:---|");
 
         int totalCrossDbEdges = 0;
-        foreach (var kv in existingDbSections.OrderBy(k => k.Key))
+        var databasesRoot = Path.Combine(serverDir, "databases");
+        if (Directory.Exists(databasesRoot))
         {
-            var dbName = kv.Key;
-            var text = kv.Value;
-            var lines = text.Split('\n');
-            string? currentTarget = null;
-            int count = 0;
-            foreach (var l in lines)
+            var dbDirs = Directory.GetDirectories(databasesRoot).OrderBy(d => Path.GetFileName(d), StringComparer.OrdinalIgnoreCase);
+            foreach (var dDir in dbDirs)
             {
-                var trimmed = l.Trim();
-                if (trimmed.StartsWith("- References **`") && trimmed.Contains("`**:"))
+                var dbName = Path.GetFileName(dDir);
+                var depFile = Path.Combine(dDir, "dependencies.compact.md");
+                if (!File.Exists(depFile)) continue;
+
+                var lines = await File.ReadAllLinesAsync(depFile, cancellationToken);
+                string? currentTarget = null;
+                int count = 0;
+                foreach (var l in lines)
                 {
-                    if (currentTarget != null && count > 0)
+                    var trimmed = l.Trim();
+                    if (trimmed.StartsWith("## References **`") && trimmed.Contains("`**"))
                     {
-                        graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
-                        totalCrossDbEdges += count;
+                        if (currentTarget != null && count > 0)
+                        {
+                            graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
+                            totalCrossDbEdges += count;
+                        }
+                        var start = trimmed.IndexOf("`") + 1;
+                        var end = trimmed.IndexOf("`**");
+                        currentTarget = trimmed.Substring(start, end - start);
+                        count = 0;
                     }
-                    var start = trimmed.IndexOf("`") + 1;
-                    var end = trimmed.IndexOf("`**:");
-                    currentTarget = trimmed.Substring(start, end - start);
-                    count = 0;
+                    else if (trimmed.StartsWith("- `") && trimmed.Contains("` -> `"))
+                    {
+                        count++;
+                    }
                 }
-                else if (trimmed.StartsWith("- `") && trimmed.Contains("` -> `"))
+                if (currentTarget != null && count > 0)
                 {
-                    count++;
+                    graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
+                    totalCrossDbEdges += count;
                 }
-            }
-            if (currentTarget != null && count > 0)
-            {
-                graphSb.AppendLine($"| **`{dbName}`** | `{currentTarget}` | {count} | [View `{dbName}` Dependencies](./databases/{dbName}/dependencies.compact.md) |");
-                totalCrossDbEdges += count;
             }
         }
 
@@ -417,8 +345,8 @@ public class AiContextRenderer
         summarySb.AppendLine($"- **Execution Duration:** {scanResult.ElapsedMs} ms");
         summarySb.AppendLine($"- **Total Databases:** {existingSummaryRows.Count}");
         summarySb.AppendLine($"- **Fast Router Map (~20KB):** [TABLES_ROUTER.compact.md](./TABLES_ROUTER.compact.md)");
+        summarySb.AppendLine($"- **Business Domain Map (~2KB):** [DOMAIN_MAP.compact.md](./DOMAIN_MAP.compact.md)");
         summarySb.AppendLine($"- **Cross-DB Dependencies Graph (~3KB):** [CROSS_DB_GRAPH.compact.md](./CROSS_DB_GRAPH.compact.md)");
-        summarySb.AppendLine($"- **Cross-DB Dependencies:** [CROSS_DB_DEPENDENCIES.compact.md](./CROSS_DB_DEPENDENCIES.compact.md)");
         summarySb.AppendLine($"- **SQLite Catalog (FTS5):** `../../catalog.db` (Searched instantly via tool `search_context`)");
         summarySb.AppendLine();
         summarySb.AppendLine("## Databases Overview");
