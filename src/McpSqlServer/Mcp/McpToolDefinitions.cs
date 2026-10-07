@@ -155,7 +155,7 @@ public static class McpToolDefinitions
                         ["target"] = new JsonObject
                         {
                             ["type"] = "string",
-                            ["description"] = "Optional search filter: 'all' (default), 'table', 'column', 'routine', 'procedure', 'view', 'function', 'trigger'."
+                            ["description"] = "Optional search filter: 'all' (default), 'table', 'column', 'routine', 'procedure', 'view', 'function', 'trigger', 'dependency'."
                         },
                         ["limit"] = new JsonObject
                         {

@@ -52,10 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_cat_name ON catalog_items(name COLLATE NOCASE);
             }
 
             // Insert tables & columns
+            var isModular = db.Tables.Count > AiContextRenderer.TableModularThreshold;
             foreach (var t in db.Tables)
             {
                 var colsSummary = string.Join(", ", t.Columns.Select(c => c.ToQuickMapString()));
                 var volInfo = t.ApproxRowCount.HasValue ? $" (~{t.ApproxRowCount.Value} rows)" : "";
+                var safeTableName = AiContextRenderer.SanitizeFileName($"{t.Schema}.{t.Name}.compact.md");
+                var tablePath = isModular
+                    ? $"servers/{serverAlias}/databases/{db.DatabaseName}/tables/{safeTableName}"
+                    : $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md";
 
                 await using (var insCmd = conn.CreateCommand())
                 {
@@ -67,7 +72,7 @@ VALUES (@alias, @db, 'table', @name, @details, @path);";
                     insCmd.Parameters.AddWithValue("@db", db.DatabaseName);
                     insCmd.Parameters.AddWithValue("@name", t.FullName);
                     insCmd.Parameters.AddWithValue("@details", $"{colsSummary}{volInfo}");
-                    insCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
+                    insCmd.Parameters.AddWithValue("@path", tablePath);
                     await insCmd.ExecuteNonQueryAsync(cancellationToken);
                 }
 
@@ -83,7 +88,7 @@ VALUES (@alias, @db, 'column', @name, @details, @path);";
                     insColCmd.Parameters.AddWithValue("@name", $"{t.FullName}.{col.Name}");
                     var sampleStr = col.SampleValues != null && col.SampleValues.Count > 0 ? $" | Observed sample: [{string.Join(", ", col.SampleValues)}] (may be incomplete)" : "";
                     insColCmd.Parameters.AddWithValue("@details", $"{col.DataType} ({(col.IsPrimaryKey ? "PK, " : "")}{(col.IsNullable ? "Null" : "Not Null")}){sampleStr}");
-                    insColCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/schema.compact.md");
+                    insColCmd.Parameters.AddWithValue("@path", tablePath);
                     await insColCmd.ExecuteNonQueryAsync(cancellationToken);
                 }
             }
@@ -155,6 +160,26 @@ VALUES (@alias, @db, 'trigger', @name, @details, @path);";
                 insTrgCmd.Parameters.AddWithValue("@details", $"Trigger on [{trg.TargetTable}] ({trg.Events})");
                 insTrgCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/triggers/{fileName}");
                 await insTrgCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            // Insert cross-db dependencies
+            var validCrossDb = db.CrossDbDependencies
+                .Where(d => !string.IsNullOrWhiteSpace(d.ReferencedDatabase) && !d.ReferencedDatabase.Equals(db.DatabaseName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var dep in validCrossDb)
+            {
+                await using var insDepCmd = conn.CreateCommand();
+                insDepCmd.Transaction = transaction;
+                insDepCmd.CommandText = @"
+INSERT INTO catalog_items (server_alias, database_name, item_type, name, details, relative_path)
+VALUES (@alias, @db, 'dependency', @name, @details, @path);";
+                insDepCmd.Parameters.AddWithValue("@alias", serverAlias);
+                insDepCmd.Parameters.AddWithValue("@db", db.DatabaseName);
+                insDepCmd.Parameters.AddWithValue("@name", $"{dep.ReferencingEntity} -> {dep.ReferencedDatabase}.{dep.ReferencedEntity}");
+                insDepCmd.Parameters.AddWithValue("@details", $"Dependency from {db.DatabaseName}.{dep.ReferencingEntity} to {dep.ReferencedDatabase}.{dep.ReferencedEntity}");
+                insDepCmd.Parameters.AddWithValue("@path", $"servers/{serverAlias}/databases/{db.DatabaseName}/dependencies.compact.md");
+                await insDepCmd.ExecuteNonQueryAsync(cancellationToken);
             }
         }
 
