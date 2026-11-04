@@ -28,7 +28,8 @@ public static class PreflightChecker
         // 2. Verify Microsoft.Data.SqlClient and Microsoft.Data.Sqlite packages
         try
         {
-            var testConn = typeof(SqlConnection);
+            // Only proves the assembly loads; opening connections is reserved for Security/ and Scanning/ (RULES #1).
+            var testConn = typeof(SqlConnectionStringBuilder);
             passed.Add($"SqlClient library ready: {testConn.Assembly.GetName().Name} v{testConn.Assembly.GetName().Version}");
         }
         catch (Exception ex)
@@ -187,13 +188,15 @@ public static class PreflightChecker
         // Test 5: Read-Only SQL Query Validator
         try
         {
-            var validSelect = SqlServerService.ValidateReadOnlyQuery("SELECT TOP 10 * FROM dbo.Orders WHERE Status = 'DELETED'");
-            var invalidDrop = SqlServerService.ValidateReadOnlyQuery("DROP TABLE dbo.Orders;");
-            var invalidInsert = SqlServerService.ValidateReadOnlyQuery("INSERT INTO dbo.Orders (Id) VALUES (1)");
+            var validSelect = Security.SelectOnlyValidator.Validate("SELECT TOP 10 * FROM dbo.Orders WHERE Status = 'DELETED'");
+            var invalidDrop = Security.SelectOnlyValidator.Validate("DROP TABLE dbo.Orders;");
+            var invalidInsert = Security.SelectOnlyValidator.Validate("INSERT INTO dbo.Orders (Id) VALUES (1)");
+            var commentBypass = Security.SelectOnlyValidator.Validate("SELECT '--'; DROP TABLE dbo.Orders");
+            var selectInto = Security.SelectOnlyValidator.Validate("SELECT * INTO dbo.Copy FROM dbo.Orders");
 
-            if (!validSelect.IsValid || invalidDrop.IsValid || invalidInsert.IsValid)
+            if (!validSelect.IsValid || invalidDrop.IsValid || invalidInsert.IsValid || commentBypass.IsValid || selectInto.IsValid)
             {
-                errors.Add("SelfTest [ValidateReadOnlyQuery] read-only validator logic failed!");
+                errors.Add("SelfTest [SelectOnlyValidator] read-only validator logic failed!");
             }
             else
             {

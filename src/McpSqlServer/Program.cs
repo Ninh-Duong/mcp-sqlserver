@@ -6,28 +6,42 @@ public class Program
     {
         Logger.Initialize(enableFileLogging: true);
 
-        // 1. Environment, packages & dependency checks (Preflight Check)
-        var preflight = PreflightChecker.RunPreflightChecks();
-        if (!preflight.Success)
-        {
-            Console.Error.WriteLine("[FATAL] Preflight Dependency Check Failed:");
-            foreach (var err in preflight.Errors)
-            {
-                Console.Error.WriteLine($" - {err}");
-            }
-            return 1;
-        }
+        var mode = args.Length > 0 ? args[0].Trim().ToLowerInvariant() : "menu";
 
-        // 2. Run In-Process Core Self-Tests (Run Gate mandatory for every run)
-        var selfTests = PreflightChecker.RunCoreSelfTests();
-        if (!selfTests.Success)
+        // `serve` (what the hub starts) must be fast and must never depend on credentials or a writable cwd.
+        // Preflight + in-process self-tests run for `--preflight` and for the interactive modes.
+        if (mode != "serve" && mode != "--serve")
         {
-            Console.Error.WriteLine("[FATAL] In-Process Self-Tests Failed:");
-            foreach (var err in selfTests.Errors)
+            var preflight = PreflightChecker.RunPreflightChecks();
+            if (!preflight.Success)
             {
-                Console.Error.WriteLine($" - {err}");
+                Console.Error.WriteLine("[FATAL] Preflight Dependency Check Failed:");
+                foreach (var err in preflight.Errors)
+                {
+                    Console.Error.WriteLine($" - {err}");
+                }
+                return 1;
             }
-            return 1;
+
+            var selfTests = PreflightChecker.RunCoreSelfTests();
+            if (!selfTests.Success)
+            {
+                Console.Error.WriteLine("[FATAL] In-Process Self-Tests Failed:");
+                foreach (var err in selfTests.Errors)
+                {
+                    Console.Error.WriteLine($" - {err}");
+                }
+                return 1;
+            }
+
+            if (mode == "--preflight" || mode == "preflight")
+            {
+                foreach (var ok in preflight.PassedChecks.Concat(selfTests.PassedChecks))
+                {
+                    Console.Error.WriteLine($"[OK] {ok}");
+                }
+                return 0;
+            }
         }
 
         using var cts = new CancellationTokenSource();
@@ -38,13 +52,11 @@ public class Program
             cts.Cancel();
         };
 
-        var mode = args.Length > 0 ? args[0].Trim().ToLowerInvariant() : "menu";
-
         try
         {
             if (mode == "serve" || mode == "--serve")
             {
-                await McpServerHandler.RunAsync(cts.Token);
+                await Mcp.McpHost.RunAsync(cts.Token);
             }
             else if (mode == "scan" || mode == "--scan")
             {

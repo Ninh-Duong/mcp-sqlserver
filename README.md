@@ -1,136 +1,79 @@
-# MCP SQL Server
+# mcp-sqlserver
 
-A lightweight, secure Microsoft SQL Server connector and schema intelligence tool supporting dual modes: **Interactive CLI Menu** (for direct human operation) and **MCP Server** (for AI agents such as Claude Desktop, Antigravity, and Codex).
+A **read-only SQL Server MCP** for investigating issues. It lets an AI agent look at real data to find a root cause, next to the log, source, ticket and pull-request MCPs of [mcp-hub](../mcp-hub). It runs **one validated `SELECT` at a time and nothing else**: no `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `EXEC`, no `SELECT INTO`, no multi-statement batches. This holds even when the SQL login itself is allowed to write.
 
----
+C# / .NET 10, MCP over stdio, [official MCP SDK](https://github.com/modelcontextprotocol/csharp-sdk), Microsoft ScriptDom for SQL validation.
 
-## 1. What does this repository do?
+## How read-only is guaranteed
 
-This repository provides high-performance Microsoft SQL Server connectivity and schema extraction using raw ADO.NET (.NET 10):
-- **Minimalist & High Performance (Ponytail)**: No bulky ORM overhead, querying system catalogs directly.
-- **Zero-Leak Security**: No passwords written to disk, automatic terminal masking (`*`), and strict redaction (`***`) across all logs and exception traces.
-- **Run Gate**: Enforces 100% passing unit tests and in-process self-checks before application launch.
-- **100% Relative Paths**: Seamless cross-platform portability.
+Six independent layers ([docs/SECURITY.md](docs/SECURITY.md)): a T-SQL **AST allowlist** (not regex), a transaction that is **always rolled back**, session guards (lock timeout, row limit, `READ UNCOMMITTED`), `ApplicationIntent=ReadOnly`, a database allow-list, and output limits with column masking. All SQL goes through one class, and tests fail the build if any other code opens a connection.
 
----
+## Tools
 
-## 2. Key Capabilities
+13 tools, all `readOnlyHint = true` (behind the hub they are `sql__<tool>`). Details: [docs/TOOLS.md](docs/TOOLS.md).
 
-1. **Interactive CLI Menu**:
-   - Connection management (Server, Username, masked Password, Port, Database, TLS/Certificate flags).
-   - Instant connection health check, latency measurement (ms), and SQL Server version retrieval.
-   - Database enumeration (categorizing System vs. User databases, ONLINE/OFFLINE state, access permissions).
-   - Table enumeration in any target database (with schema names: `dbo`, `sales`, etc.).
-2. **Multi-Server Scan & Token-Optimized AI Context Generation (DEV, UAT, PROD...)**:
-   - Automatically scans all databases: Tables, Columns (with formatted Data Types, Nullable, Identity, PK, FK, and `MS_Description`).
-   - Extracts complete SQL logic for all Views and Stored Procedures.
-   - **Progressive Disclosure Architecture**:
-     - `INDEX.md`: Central Master Index aggregating all servers (DEV, UAT, PROD) for instant environment mapping.
-     - `GLOBAL_TABLES_MAP.compact.md`: One line per table, allowing AI agents to reverse-search (`grep`) any column or table across the entire instance in 0.1s.
-     - `schema.compact.md`: Ultra-dense schema lookup format (~60% token savings compared to JSON or DDL).
-     - `views/*.sql` & `procedures/*.sql`: Isolated SQL files allowing AI agents to read only the specific routine needed.
-3. **MCP STDIO Server**:
-   - Provides 5 tools for AI agents:
-     1. `test_connection`: Verify server connectivity and fetch latency/version.
-     2. `list_databases`: Enumerate databases visible to current login.
-     3. `list_tables`: Enumerate tables in a specific database.
-     4. `scan_server_context`: Scan entire SQL instance and export token-optimized AI Context documentation.
-     5. `execute_query`: Execute read-only SQL queries (`SELECT`) with automated safety guards against data mutation.
-   - Strict STDIO isolation: JSON-RPC over `stdout`, diagnostics over `stderr` and `./logs/process.log`.
+| Group | Tools |
+|---|---|
+| Server | `check_connection`, `list_databases` |
+| Schema (live) | `list_tables`, `describe_table`, `find_columns`, `get_object_definition` |
+| Data | `lookup_rows` (no SQL needed), `get_related_rows` (follow foreign keys), `run_select`, `explain_select` |
+| Offline snapshot | `search_context`, `get_object_context`, `check_schema_drift` |
 
----
+How an agent uses them to get from a symptom to a root cause: [docs/INVESTIGATION_PLAYBOOK.md](docs/INVESTIGATION_PLAYBOOK.md).
 
-## 3. Quick Start
+## Use it with mcp-hub
 
-### Prerequisites
-- **.NET 10 SDK** or higher (`dotnet --version`).
+The hub starts it as a child process and exposes `sql__*`. Step by step: [docs/HUB_INTEGRATION.md](docs/HUB_INTEGRATION.md). In short: the hub files (`config/mcps/mcp-sqlserver.example.json`, the `sql` feature in `config/hub.example.json`, `docs/mcps/mcp-sqlserver.md`) are already in `mcp-hub`; fill the `mssql` section of the private child file and enable it.
 
----
+## Run it stand-alone
 
-### Option 1: Interactive CLI Menu
+Requirements: .NET 10 SDK.
 
-Run from terminal:
-
-```pwsh
-dotnet run --project ./src/McpSqlServer -- menu
+```powershell
+Copy-Item dbconfig.example.json dbconfig.json      # git-ignored; fill server, username, password
+dotnet run --project src/McpSqlServer -- serve     # MCP over stdio
+dotnet run --project src/McpSqlServer -- menu      # interactive menu (default mode)
+dotnet run --project src/McpSqlServer -- --preflight
 ```
 
-*(Or use the automated test gate runner: `powershell -File ./scripts/run.ps1 menu`)*
+Or set `MSSQL_SERVER`, `MSSQL_USERNAME`, `MSSQL_PASSWORD`. All keys, priority (environment > hub section > local file > default) and examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-**Menu Controls:**
-- Press **`1`** + Enter: Configure connection (`Server`, `Username`, `Password`, `Server Alias` like DEV/UAT/PROD).
-- Press **`2`** + Enter: Test connection.
-- Press **`3`** + Enter: List accessible databases.
-- Press **`4`** + Enter: List tables in a database.
-- Press **`5`** + Enter: **Scan entire server & export AI Context docs (DEV/UAT/PROD)**.
-- Press **`0`** + Enter: Exit.
+The server starts and lists its tools even with no credentials; database tools then answer `not configured`.
 
-**Headless Automation (CLI Scan):**
-```pwsh
-dotnet run --project ./src/McpSqlServer -- scan --server-alias DEV --output ./ai-context
+A read-only login is recommended but not required: [docs/readonly-login.sql](docs/readonly-login.sql).
+
+## Offline snapshot
+
+`scan` reads the catalog of every accessible database (tables, columns, keys, indexes, views, procedures, functions, triggers, cross-database dependencies) and writes compact files an agent can search without touching the server:
+
+```powershell
+dotnet run --project src/McpSqlServer -- scan --alias DEV --output ./ai-context     # all databases
+dotnet run --project src/McpSqlServer -- scan --alias DEV -d CRM_Order              # one database
+dotnet run --project src/McpSqlServer -- scan --alias DEV --resume                 # finish databases that failed
 ```
 
-The full scan processes up to four databases concurrently and saves each database report under `./ai-context/.scan-state`. If some databases fail or the process is interrupted, run the same command with `--resume` to scan only the unfinished databases:
+Output under `ai-context/` (git-ignored): `INDEX.md`, `servers_registry.json`, `catalog.db` (SQLite, used by `search_context`), and per server `summary.md`, `TABLES_ROUTER.compact.md`, `CROSS_DB_GRAPH.compact.md` and per database `schema.compact.md` (an index plus one file per table when a database has more than 50 tables), `dependencies.compact.md`, and `views/`, `procedures/`, `functions/`, `triggers/` with one `.sql` file each. `scan` is a command-line command only; it is not an MCP tool.
 
-```pwsh
-dotnet run --project ./src/McpSqlServer -- scan --server-alias DEV --output ./ai-context --resume
+## Develop
+
+```powershell
+dotnet test McpSqlServer.slnx        # no database needed (integration tests skip themselves)
+scripts/build.ps1                    # restore, build, test
+dotnet publish src/McpSqlServer -c Release -o publish
 ```
 
-A partial scan lists failed databases and exits with code 2. Use the same server alias, server, and output directory when resuming.
+Start with [AGENTS.md](AGENTS.md), [docs/RULES.md](docs/RULES.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); code standards in [docs/STANDARDS.md](docs/STANDARDS.md); decisions in [docs/adr/](docs/adr/).
 
-> [!TIP]
-> **Automatic configuration via `dbconfig.json`:**
-> Copy [`dbconfig.example.json`](file:///d:/VisualStudioCode/mcp-sqlserver/dbconfig.example.json) to `dbconfig.json` in the project root:
-> ```json
-> {
->   "ServerAlias": "DEV",
->   "Server": "sql.example.internal",
->   "Username": "reader",
->   "Password": "YourPassword123",
->   "Database": "master",
->   "Port": 1433,
->   "Encrypt": true,
->   "TrustServerCertificate": false
-> }
-> ```
-> `dbconfig.json` is protected by `.gitignore` to prevent accidental credential commits.
+## Documentation map
 
----
-
-### Option 2: MCP Server for AI Agents (Claude Desktop, Antigravity, Codex)
-
-1. Set environment variables:
-   ```pwsh
-   $env:MSSQL_SERVER_ALIAS = "DEV"
-   $env:MSSQL_SERVER = "sql.example.internal"
-   $env:MSSQL_USERNAME = "your_username"
-   $env:MSSQL_PASSWORD = "your_password"
-   $env:MSSQL_TRUST_CERTIFICATE = "true"  # Enable if using self-signed SSL
-   ```
-
-2. Add to your AI Client's configuration file:
-   ```json
-   {
-     "mcpServers": {
-       "sqlserver": {
-         "command": "dotnet",
-         "args": ["run", "--project", "./src/McpSqlServer", "--", "serve"],
-         "env": {
-           "MSSQL_SERVER_ALIAS": "DEV",
-           "MSSQL_SERVER": "sql.example.internal",
-           "MSSQL_USERNAME": "your_username",
-           "MSSQL_PASSWORD": "your_password",
-           "MSSQL_TRUST_CERTIFICATE": "true"
-         }
-       }
-     }
-   }
-   ```
-
----
-
-### Option 3: Running Unit Tests
-
-```pwsh
-dotnet test ./tests/McpSqlServer.Tests
-```
+| Doc | For |
+|---|---|
+| [RULES](docs/RULES.md) | Invariants that keep the MCP read-only and hub-compatible |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Layers, dependencies, life of a request |
+| [SECURITY](docs/SECURITY.md) | The six layers, closed bypasses, residual risk |
+| [STANDARDS](docs/STANDARDS.md) | Tool, code, test and doc conventions |
+| [TOOLS](docs/TOOLS.md) | Contract of every tool |
+| [CONFIGURATION](docs/CONFIGURATION.md) | Keys, priority, examples |
+| [HUB_INTEGRATION](docs/HUB_INTEGRATION.md) | Connecting to mcp-hub |
+| [INVESTIGATION_PLAYBOOK](docs/INVESTIGATION_PLAYBOOK.md) | How agents find root causes with these tools |
+| [adr/](docs/adr/) | Architecture decisions |

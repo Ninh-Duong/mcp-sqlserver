@@ -408,21 +408,7 @@ public class CliMenu
         Console.WriteLine($"Inspecting live databases on [{_options.ServerAlias}] ({_options.Server})...\n");
 
         var outDir = "./ai-context";
-        var registryPath = Path.Combine(outDir, "servers_registry.json");
-        IReadOnlyDictionary<string, DatabaseMigrationStatus>? cachedMigrations = null;
-
-        if (File.Exists(registryPath))
-        {
-            try
-            {
-                var json = await File.ReadAllTextAsync(registryPath, cancellationToken);
-                var items = System.Text.Json.JsonSerializer.Deserialize<List<ServerRegistryItem>>(json);
-                var serverItem = items?.FirstOrDefault(i => i.ServerAlias.Equals(_options.ServerAlias, StringComparison.OrdinalIgnoreCase))
-                                 ?? items?.FirstOrDefault();
-                cachedMigrations = serverItem?.Migrations;
-            }
-            catch { }
-        }
+        var cachedMigrations = await ServerRegistryReader.LoadMigrationsAsync(outDir, _options.ServerAlias, cancellationToken);
 
         var driftResult = await _sqlService.CheckSchemaDriftAsync(_options, cachedMigrations, cancellationToken);
         if (!driftResult.Success)

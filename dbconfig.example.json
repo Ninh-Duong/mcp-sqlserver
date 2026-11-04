@@ -1,12 +1,17 @@
 {
-  "ServerAlias": "DEV",
-  "Server": "",
-  "Username": "",
-  "Password": "",
-  "Database": "master",
-  "Port": 1433,
-  "Encrypt": true,
-  "TrustServerCertificate": false,
-  "ConnectTimeout": 10,
-  "QueryTimeout": 15
+  "server_alias": "DEV",
+  "server": "",
+  "port": 1433,
+  "username": "",
+  "password": "",
+  "database": "master",
+  "encrypt": true,
+  "trust_server_certificate": false,
+  "connect_timeout": 10,
+  "query_timeout": 30,
+  "allowed_databases": [],
+  "isolation": "read_uncommitted",
+  "lock_timeout_ms": 3000,
+  "max_rows": 100,
+  "context_directory": "./ai-context"
 }

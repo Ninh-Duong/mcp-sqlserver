@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Standard launch script for McpSqlServer.
-    Enforces RULE.md: Requires 100% passing unit tests before starting the application.
+    Enforces docs/RULES.md (run gate): requires 100% passing unit tests before starting the application.
 #>
 
 $ErrorActionPreference = "Stop"

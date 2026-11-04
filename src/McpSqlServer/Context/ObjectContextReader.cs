@@ -12,16 +12,23 @@ public static class ObjectContextReader
         string? objectType = null,
         CancellationToken cancellationToken = default)
     {
+        var normalizedName = (objectName ?? string.Empty).Trim().Trim('[', ']');
+        var pureName = normalizedName.Contains('.') ? normalizedName.Substring(normalizedName.LastIndexOf('.') + 1) : normalizedName;
+        var type = objectType?.Trim().ToLowerInvariant();
+
+        // Every caller-supplied value becomes part of a path or a glob pattern: allow plain names only.
+        if (!IsSafeSegment(serverAlias) || !IsSafeSegment(database) || !IsSafeSegment(pureName))
+        {
+            return "Invalid server_alias, database or name: path separators, '..' and wildcards are not allowed.";
+        }
+
         var fullBaseDir = Path.GetFullPath(baseDirectory);
-        var dbDir = Path.Combine(fullBaseDir, "servers", serverAlias, "databases", database);
-        if (!Directory.Exists(dbDir))
+        var dbDir = Path.GetFullPath(Path.Combine(fullBaseDir, "servers", serverAlias, "databases", database));
+        var serversRoot = Path.GetFullPath(Path.Combine(fullBaseDir, "servers")) + Path.DirectorySeparatorChar;
+        if (!dbDir.StartsWith(serversRoot, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(dbDir))
         {
             return $"Database '{database}' on server '{serverAlias}' not found in ai-context snapshot.";
         }
-
-        var normalizedName = objectName.Trim().Trim('[', ']');
-        var pureName = normalizedName.Contains('.') ? normalizedName.Substring(normalizedName.LastIndexOf('.') + 1) : normalizedName;
-        var type = objectType?.Trim().ToLowerInvariant();
 
         // 1. If table or unspecified, check individual table files first, then fallback to schema.compact.md
         if (type == "table" || string.IsNullOrEmpty(type))
@@ -97,18 +104,14 @@ public static class ObjectContextReader
                 }
             }
 
-            var crossDbPath = Path.Combine(fullBaseDir, "servers", serverAlias, "CROSS_DB_DEPENDENCIES.compact.md");
-            if (File.Exists(crossDbPath))
-            {
-                var lines = await File.ReadAllLinesAsync(crossDbPath, cancellationToken);
-                var matchingLines = lines.Where(l => l.Contains(pureName, StringComparison.OrdinalIgnoreCase)).ToList();
-                if (matchingLines.Count > 0)
-                {
-                    return $"### Cross-Database Dependencies for '{pureName}':\n" + string.Join("\n", matchingLines);
-                }
-            }
         }
 
         return $"Object '{objectName}' not found in ai-context snapshot for {serverAlias}/{database}.";
+    }
+
+    internal static bool IsSafeSegment(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 128 || value == "." || value == "..") return false;
+        return value.IndexOfAny(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0']) < 0 && !value.Any(char.IsControl);
     }
 }

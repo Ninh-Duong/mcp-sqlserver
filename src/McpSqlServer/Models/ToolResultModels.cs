@@ -4,8 +4,15 @@ public record ConnectionCheckResult(
     bool Success,
     long ElapsedMs,
     string? ServerVersion = null,
-    string? ErrorMessage = null
-);
+    string? ErrorMessage = null,
+    bool? WriteCapable = null,
+    IReadOnlyList<string>? Warnings = null,
+    IReadOnlyDictionary<string, string>? ConfigSource = null
+)
+{
+    /// <summary>Field the hub smoke check looks for: {"connected": true, ...}.</summary>
+    public bool Connected => Success;
+}
 
 public record DatabaseItem(
     int DatabaseId,
@@ -42,11 +49,12 @@ public record QueryExecutionResult(
     bool Success,
     string Database,
     int RowCount,
-    bool IsTruncated,
+    [property: System.Text.Json.Serialization.JsonPropertyName("truncated")] bool IsTruncated,
     long ElapsedMs,
     IReadOnlyList<string> Columns,
     IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows,
-    string? ErrorMessage = null
+    string? ErrorMessage = null,
+    string? Sql = null
 );
 
 public record DatabaseDriftInfo(

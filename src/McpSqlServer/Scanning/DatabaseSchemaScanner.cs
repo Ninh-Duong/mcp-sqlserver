@@ -665,7 +665,7 @@ ORDER BY referencing_entity, referenced_database_name;";
         }
         catch (SqlException ex)
         {
-            var friendlyError = SqlServerService.FormatSqlException(ex, targetOptions);
+            var friendlyError = Security.ReadOnlyQueryExecutor.FormatSqlException(ex, targetOptions);
             Logger.Error($"Error scanning database '{dbName}' (Code {ex.Number})", ex);
             return new DatabaseScanReport(dbName, false, 0, 0, 0, [], [], [], friendlyError);
         }
@@ -753,7 +753,8 @@ ORDER BY pm.object_id, pm.parameter_id;";
         var serverVersion = testResult.ServerVersion ?? "Microsoft SQL Server (Unspecified version)";
 
         onProgress?.Invoke("Fetching database catalog...");
-        var dbListResult = await sqlService.ListDatabasesAsync(options, cancellationToken);
+        // The offline CLI scanner may scan system databases on request, so it ignores the MCP allow-list.
+        var dbListResult = await sqlService.ListDatabasesAsync(options, cancellationToken, respectAllowList: false);
         if (!dbListResult.Success)
         {
             throw new InvalidOperationException($"Unable to fetch database list: {dbListResult.ErrorMessage}");

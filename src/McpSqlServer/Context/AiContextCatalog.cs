@@ -183,18 +183,6 @@ VALUES (@alias, @db, 'dependency', @name, @details, @path);";
             }
         }
 
-        try
-        {
-            await using var syncFts = conn.CreateCommand();
-            syncFts.Transaction = transaction;
-            syncFts.CommandText = "INSERT INTO catalog_fts(catalog_fts) VALUES('rebuild');";
-            await syncFts.ExecuteNonQueryAsync(cancellationToken);
-        }
-        catch
-        {
-            // Ignore if rebuild command unsupported
-        }
-
         await transaction.CommitAsync(cancellationToken);
         return dbPath;
     }

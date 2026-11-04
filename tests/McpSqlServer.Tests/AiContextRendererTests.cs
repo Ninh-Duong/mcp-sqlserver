@@ -205,8 +205,8 @@ public class AiContextRendererTests
     [InlineData("", false)]
     public void ValidateReadOnlyQuery_TestsSecurityBoundary(string query, bool expectedValid)
     {
-        var (isValid, _) = SqlServerService.ValidateReadOnlyQuery(query);
-        Assert.Equal(expectedValid, isValid);
+        var result = McpSqlServer.Security.SelectOnlyValidator.Validate(query);
+        Assert.Equal(expectedValid, result.IsValid);
     }
 
     [Fact]

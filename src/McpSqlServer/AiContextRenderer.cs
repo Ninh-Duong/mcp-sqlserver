@@ -183,7 +183,7 @@ public class AiContextRenderer
             }
         }
 
-        // 2. Update SQLite Catalog (catalog.db with FTS5)
+        // 2. Update SQLite Catalog (catalog.db)
         var catalogDbPath = await UpdateCatalogDbAsync(baseDir, scanResult.ServerAlias, scanResult.Databases, cancellationToken);
         createdFiles.Add(catalogDbPath);
 
@@ -345,9 +345,8 @@ public class AiContextRenderer
         summarySb.AppendLine($"- **Execution Duration:** {scanResult.ElapsedMs} ms");
         summarySb.AppendLine($"- **Total Databases:** {existingSummaryRows.Count}");
         summarySb.AppendLine($"- **Fast Router Map (~20KB):** [TABLES_ROUTER.compact.md](./TABLES_ROUTER.compact.md)");
-        summarySb.AppendLine($"- **Business Domain Map (~2KB):** [DOMAIN_MAP.compact.md](./DOMAIN_MAP.compact.md)");
         summarySb.AppendLine($"- **Cross-DB Dependencies Graph (~3KB):** [CROSS_DB_GRAPH.compact.md](./CROSS_DB_GRAPH.compact.md)");
-        summarySb.AppendLine($"- **SQLite Catalog (FTS5):** `../../catalog.db` (Searched instantly via tool `search_context`)");
+        summarySb.AppendLine($"- **SQLite Catalog:** `../../catalog.db` (Searched instantly via tool `search_context`)");
         summarySb.AppendLine();
         summarySb.AppendLine("## Databases Overview");
         summarySb.AppendLine();

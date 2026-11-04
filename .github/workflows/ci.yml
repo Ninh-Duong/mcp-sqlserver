@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore McpSqlServer.slnx
+      - run: dotnet build McpSqlServer.slnx -c Release --no-restore
+      # No database is needed: the integration tests skip themselves unless MSSQL_SERVER/USERNAME/PASSWORD are set.
+      # The tests that check the sibling mcp-hub files skip themselves when it is not checked out.
+      - run: dotnet test McpSqlServer.slnx -c Release --no-build

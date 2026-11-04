@@ -13,7 +13,53 @@ public class ConnectionOptions
     public bool Encrypt { get; set; } = true;
     public bool TrustServerCertificate { get; set; } = false;
     public int ConnectTimeout { get; set; } = 10;
-    public int QueryTimeout { get; set; } = 15;
+    public int QueryTimeout { get; set; } = 30;
+
+    // --- Read-only investigation settings (see docs/CONFIGURATION.md) ---
+
+    /// <summary>Databases the investigation tools may touch. Empty = every database except <see cref="DefaultBlockedDatabases"/>.</summary>
+    public List<string> AllowedDatabases { get; set; } = new();
+
+    /// <summary>"read_uncommitted" (default, never blocks production writers) or "read_committed".</summary>
+    public string Isolation { get; set; } = "read_uncommitted";
+
+    public int LockTimeoutMs { get; set; } = 3000;
+
+    /// <summary>Default row cap per query. Hard cap is <see cref="HardMaxRows"/>.</summary>
+    public int MaxRows { get; set; } = 100;
+
+    /// <summary>Regex of column names whose values are replaced with '***'.</summary>
+    public string MaskedColumnPatterns { get; set; } = "password|passwd|pwd|token|secret|salt|hash|api_?key";
+
+    /// <summary>Where each config value group came from: env | hub | local | default | unset. Never holds values.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Dictionary<string, string> ConfigSources { get; set; } = new();
+
+    /// <summary>Folder of the offline schema snapshot (written by the CLI `scan`, read by search_context / get_object_context).</summary>
+    public string ContextDirectory { get; set; } = "./ai-context";
+
+    public const int HardMaxRows = 1000;
+    public const string ApplicationName = "mcp-sqlserver-readonly";
+    public static readonly string[] DefaultBlockedDatabases = ["master", "msdb", "model", "tempdb", "rdsadmin"];
+
+    public bool IsDatabaseAllowed(string? database)
+    {
+        if (string.IsNullOrWhiteSpace(database)) return false;
+        var name = database.Trim();
+        return AllowedDatabases.Count > 0
+            ? AllowedDatabases.Contains(name, StringComparer.OrdinalIgnoreCase)
+            : !DefaultBlockedDatabases.Contains(name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Copy of these options pointing at another initial database.</summary>
+    public ConnectionOptions WithDatabase(string database)
+    {
+        var copy = (ConnectionOptions)MemberwiseClone();
+        copy.Database = database;
+        copy.AllowedDatabases = new List<string>(AllowedDatabases);
+        copy.ConfigSources = new Dictionary<string, string>(ConfigSources);
+        return copy;
+    }
 
     public List<string> Validate()
     {
@@ -76,41 +122,15 @@ public class ConnectionOptions
         builder.TrustServerCertificate = TrustServerCertificate;
         builder.ConnectTimeout = ConnectTimeout;
         builder.Pooling = true;
+        builder.ApplicationIntent = ApplicationIntent.ReadOnly;
+        builder.ApplicationName = ApplicationName;
 
         return builder.ConnectionString;
     }
 
+    /// <summary>Environment variables only (MSSQL_*). No file is read.</summary>
     public static ConnectionOptions FromEnvironment()
-    {
-        var options = new ConnectionOptions
-        {
-            ServerAlias = Environment.GetEnvironmentVariable("MSSQL_SERVER_ALIAS") ?? "DEV",
-            Server = Environment.GetEnvironmentVariable("MSSQL_SERVER") ?? string.Empty,
-            Username = Environment.GetEnvironmentVariable("MSSQL_USERNAME") ?? string.Empty,
-            Password = Environment.GetEnvironmentVariable("MSSQL_PASSWORD") ?? string.Empty,
-            Database = Environment.GetEnvironmentVariable("MSSQL_DATABASE") ?? "master"
-        };
-
-        var portStr = Environment.GetEnvironmentVariable("MSSQL_PORT");
-        if (int.TryParse(portStr, out var port))
-        {
-            options.Port = port;
-        }
-
-        var trustCertStr = Environment.GetEnvironmentVariable("MSSQL_TRUST_CERTIFICATE");
-        if (bool.TryParse(trustCertStr, out var trustCert))
-        {
-            options.TrustServerCertificate = trustCert;
-        }
-
-        var timeoutStr = Environment.GetEnvironmentVariable("MSSQL_CONNECT_TIMEOUT");
-        if (int.TryParse(timeoutStr, out var timeout))
-        {
-            options.ConnectTimeout = timeout;
-        }
-
-        return options;
-    }
+        => Configuration.ConfigLoader.Load(localPath: string.Empty, centralConfigPath: string.Empty).Options;
 
     public bool HasRequiredCredentials()
     {
@@ -119,46 +139,21 @@ public class ConnectionOptions
                !string.IsNullOrEmpty(Password);
     }
 
+    /// <summary>Reads one local config file only (no environment, no hub). Used by the interactive menu.</summary>
     public static (bool loaded, ConnectionOptions? options) TryLoadFromFile(string relativePath = "dbconfig.json")
     {
-        try
+        if (!File.Exists(relativePath))
         {
-            if (!File.Exists(relativePath))
-            {
-                return (false, null);
-            }
-
-            var json = File.ReadAllText(relativePath);
-            var options = System.Text.Json.JsonSerializer.Deserialize<ConnectionOptions>(json, new System.Text.Json.JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
-            if (options != null && options.HasRequiredCredentials())
-            {
-                return (true, options);
-            }
-
-            return (false, options);
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"Unable to read configuration file '{relativePath}': {ex.Message}");
             return (false, null);
         }
+
+        var options = Configuration.ConfigLoader.Load(relativePath, getEnv: _ => null, centralConfigPath: string.Empty).Options;
+        return (options.HasRequiredCredentials(), options);
     }
 
+    /// <summary>Hub-standard layered load: env > CENTRAL_CONFIG_PATH "mssql" section > local file > defaults.</summary>
     public static ConnectionOptions FromConfigOrEnvironment(string relativePath = "dbconfig.json")
-    {
-        var (loaded, fileOptions) = TryLoadFromFile(relativePath);
-        if (loaded && fileOptions != null)
-        {
-            Logger.Info($"Loaded database configuration from '{relativePath}'.");
-            return fileOptions;
-        }
-
-        return FromEnvironment();
-    }
+        => Configuration.ConfigLoader.Load(relativePath).Options;
 
     public string GetDisplaySummary()
     {
