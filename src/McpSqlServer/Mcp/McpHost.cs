@@ -18,7 +18,7 @@ public static class McpHost
         "explain_select when the problem is a slow query. Use run_select only for what the other tools cannot express. " +
         "Results are capped (rows, cell size, response size): filter by key or date instead of reading whole tables, and check 'truncated'. " +
         "Sensitive columns (password, token, secret, ...) are masked as '***'. " +
-        "If a tool answers 'not configured', credentials are missing in the hub config (section 'mssql').";
+        "If a tool answers 'not configured', no account is set (hub config section 'mssql', or the child's dbconfig.json): ask the user to fill it in, never for the values.";
 
     public static async Task RunAsync(CancellationToken cancellationToken)
     {

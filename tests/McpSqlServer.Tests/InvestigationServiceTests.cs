@@ -307,7 +307,8 @@ public class ObjectContextReaderSecurityTests
     {
         var result = await ObjectContextReader.GetObjectContextAsync(Path.GetTempPath(), alias, database, name);
 
-        Assert.Contains("Invalid", result);
+        Assert.False(result.Found);
+        Assert.Contains("Invalid", result.Text);
     }
 
     [Theory]

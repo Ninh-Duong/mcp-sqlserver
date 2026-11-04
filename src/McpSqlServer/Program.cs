@@ -56,6 +56,7 @@ public class Program
         {
             if (mode == "serve" || mode == "--serve")
             {
+                BuildFreshness.WarnIfStale();
                 await Mcp.McpHost.RunAsync(cts.Token);
             }
             else if (mode == "scan" || mode == "--scan")

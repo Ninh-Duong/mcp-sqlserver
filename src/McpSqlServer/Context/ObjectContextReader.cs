@@ -4,7 +4,7 @@ namespace McpSqlServer;
 
 public static class ObjectContextReader
 {
-    public static async Task<string> GetObjectContextAsync(
+    public static async Task<ObjectContextResult> GetObjectContextAsync(
         string baseDirectory,
         string serverAlias,
         string database,
@@ -14,12 +14,11 @@ public static class ObjectContextReader
     {
         var normalizedName = (objectName ?? string.Empty).Trim().Trim('[', ']');
         var pureName = normalizedName.Contains('.') ? normalizedName.Substring(normalizedName.LastIndexOf('.') + 1) : normalizedName;
-        var type = objectType?.Trim().ToLowerInvariant();
 
         // Every caller-supplied value becomes part of a path or a glob pattern: allow plain names only.
         if (!IsSafeSegment(serverAlias) || !IsSafeSegment(database) || !IsSafeSegment(pureName))
         {
-            return "Invalid server_alias, database or name: path separators, '..' and wildcards are not allowed.";
+            return new(false, "Invalid server_alias, database or name: path separators, '..' and wildcards are not allowed.");
         }
 
         var fullBaseDir = Path.GetFullPath(baseDirectory);
@@ -27,9 +26,17 @@ public static class ObjectContextReader
         var serversRoot = Path.GetFullPath(Path.Combine(fullBaseDir, "servers")) + Path.DirectorySeparatorChar;
         if (!dbDir.StartsWith(serversRoot, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(dbDir))
         {
-            return $"Database '{database}' on server '{serverAlias}' not found in ai-context snapshot.";
+            return new(false, $"Database '{database}' on server '{serverAlias}' not found in ai-context snapshot.");
         }
 
+        var text = await FindAsync(dbDir, pureName, objectType?.Trim().ToLowerInvariant(), cancellationToken);
+        return text is null
+            ? new(false, $"Object '{objectName}' not found in ai-context snapshot for {serverAlias}/{database}.")
+            : new(true, text);
+    }
+
+    private static async Task<string?> FindAsync(string dbDir, string pureName, string? type, CancellationToken cancellationToken)
+    {
         // 1. If table or unspecified, check individual table files first, then fallback to schema.compact.md
         if (type == "table" || string.IsNullOrEmpty(type))
         {
@@ -106,7 +113,7 @@ public static class ObjectContextReader
 
         }
 
-        return $"Object '{objectName}' not found in ai-context snapshot for {serverAlias}/{database}.";
+        return null;
     }
 
     internal static bool IsSafeSegment(string? value)

@@ -170,7 +170,7 @@ public sealed class SqlTools(
         if (string.IsNullOrWhiteSpace(query)) return Required("query");
         var result = await AiContextRenderer.SearchContextAsync(
             options.ContextDirectory, query, database, target, Math.Clamp(limit, 1, 50), server_alias, include_details, cancellationToken);
-        return ToolResults.From(result, true);
+        return ToolResults.From(result, result.Success);
     }
 
     [McpServerTool(Name = "get_object_context", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
@@ -184,9 +184,9 @@ public sealed class SqlTools(
     {
         if (string.IsNullOrWhiteSpace(database)) return Required("database");
         if (string.IsNullOrWhiteSpace(name)) return Required("name");
-        var text = await AiContextRenderer.GetObjectContextAsync(
+        var result = await AiContextRenderer.GetObjectContextAsync(
             options.ContextDirectory, string.IsNullOrWhiteSpace(server_alias) ? options.ServerAlias : server_alias.Trim(), database.Trim(), name, type, cancellationToken);
-        return ToolResults.Text(text, isError: text.StartsWith("Invalid ", StringComparison.Ordinal));
+        return result.Found ? ToolResults.Text(result.Text) : ToolResults.Error(result.Text);
     }
 
     [McpServerTool(Name = "check_schema_drift", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = true)]

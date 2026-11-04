@@ -628,7 +628,7 @@ public class AiContextRenderer
         CancellationToken cancellationToken = default)
         => AiContextCatalog.SearchContextAsync(baseDirectory, query, database, target, limit, serverAlias, includeDetails, cancellationToken);
 
-    public static Task<string> GetObjectContextAsync(
+    public static Task<ObjectContextResult> GetObjectContextAsync(
         string baseDirectory,
         string serverAlias,
         string database,

@@ -196,6 +196,20 @@ public sealed class McpStdioEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task OfflineSnapshotTools_WithoutASnapshot_SetTheErrorFlag()
+    {
+        await StartAndInitializeAsync(); // fresh working directory: no ai-context/
+
+        var (searchIsError, searchText) = await CallToolAsync("search_context", new { query = "Orders" });
+        var (objectIsError, objectText) = await CallToolAsync("get_object_context", new { database = "Crm", name = "Orders" });
+
+        Assert.True(searchIsError);
+        Assert.Contains("scan", searchText);
+        Assert.True(objectIsError);
+        Assert.Contains("not found", objectText);
+    }
+
+    [Fact]
     public async Task UnknownTool_ReturnsAJsonRpcError()
     {
         await StartAndInitializeAsync();

@@ -660,7 +660,8 @@ public class AiContextRendererTests
             ]);
             await AiContextRenderer.RenderAndExportAsync(res, tempDir);
 
-            var tableMd = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "Orders", "table");
+            var (found, tableMd) = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "Orders", "table");
+            Assert.True(found);
 
             Assert.Contains("### dbo.Orders", tableMd);
             Assert.Contains("OrderId", tableMd);
@@ -688,7 +689,7 @@ public class AiContextRendererTests
             ]);
             await AiContextRenderer.RenderAndExportAsync(res, tempDir);
 
-            var sql = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "sp_GetOrder", "procedure");
+            var sql = (await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "sp_GetOrder", "procedure")).Text;
 
             Assert.Contains("sp_GetOrder", sql);
             Assert.Contains("SELECT * FROM Orders", sql);
@@ -737,7 +738,7 @@ public class AiContextRendererTests
             Assert.Contains("./tables/dbo.Table1.compact.md", schemaContent);
 
             // 4. Verify GetObjectContextAsync resolves table directly from tables directory
-            var table50Md = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "LargeDb", "Table50", "table");
+            var table50Md = (await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "LargeDb", "Table50", "table")).Text;
             Assert.Contains("### dbo.Table50", table50Md);
         }
         finally
@@ -782,7 +783,7 @@ public class AiContextRendererTests
             Assert.Contains("| **`CRM_Order`** | `CRM_Identity` | 1 |", graphContent);
 
             // 3. Verify GetObjectContextAsync finds dependency from local dependencies.compact.md
-            var depCtx = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "CRM_Order", "sp_ProcessOrder", "dependency");
+            var depCtx = (await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "CRM_Order", "sp_ProcessOrder", "dependency")).Text;
             Assert.Contains("sp_ProcessOrder", depCtx);
             Assert.Contains("CRM_Billing", depCtx);
         }
@@ -857,6 +858,104 @@ public class AiContextRendererTests
         }
         finally
         {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetObjectContextAsync_MissingObject_IsNotFound()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_get_missing_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var res = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 1, 0, 0, [
+                    new TableSchemaItem("dbo", "Orders", [new ColumnSchemaItem("OrderId", "bigint", false, true, true)])
+                ], [], [])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(res, tempDir);
+
+            var missingObject = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "Db1", "NoSuchTable");
+            var missingDatabase = await AiContextRenderer.GetObjectContextAsync(tempDir, "DEV", "NoSuchDb", "Orders");
+
+            Assert.False(missingObject.Found);
+            Assert.Contains("not found", missingObject.Text);
+            Assert.False(missingDatabase.Found);
+            Assert.Contains("not found", missingDatabase.Text);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_WithoutSnapshot_FailsWithScanHint()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_none_" + Guid.NewGuid().ToString("N"));
+
+        var result = await AiContextRenderer.SearchContextAsync(tempDir, "Orders");
+
+        Assert.False(result.Success);
+        Assert.Contains("scan", result.Message);
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_EmptyQuery_Fails()
+    {
+        var result = await AiContextRenderer.SearchContextAsync(Path.GetTempPath(), "  ");
+
+        Assert.False(result.Success);
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_UnreadableCatalog_FailsWithoutLeakingThePath()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_bad_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(tempDir, "catalog.db"), "this is not a sqlite database");
+
+            var result = await AiContextRenderer.SearchContextAsync(tempDir, "Orders");
+
+            Assert.False(result.Success);
+            Assert.DoesNotContain(tempDir, result.Message);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task SearchContextAsync_NoMatches_IsStillASuccess()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "mcp_search_empty_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var res = new ServerScanResult("DEV", "localhost", "2022", DateTime.Now, 10, [
+                new DatabaseScanReport("Db1", true, 1, 0, 0, [
+                    new TableSchemaItem("dbo", "Orders", [new ColumnSchemaItem("OrderId", "bigint", false, true, true)])
+                ], [], [])
+            ]);
+            await AiContextRenderer.RenderAndExportAsync(res, tempDir);
+
+            var result = await AiContextRenderer.SearchContextAsync(tempDir, "ZzzNothing");
+
+            Assert.True(result.Success);
+            Assert.Equal(0, result.TotalMatches);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             if (Directory.Exists(tempDir))
             {
                 try { Directory.Delete(tempDir, true); } catch { }

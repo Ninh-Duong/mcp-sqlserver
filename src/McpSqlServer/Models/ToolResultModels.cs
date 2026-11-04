@@ -88,8 +88,12 @@ public record SearchContextResult(
     string Query,
     int TotalMatches,
     IReadOnlyList<SearchContextMatch> Matches,
-    string Message
+    string Message,
+    bool Success = true
 );
+
+/// <summary>One object from the offline snapshot. <see cref="Found"/> is false for invalid input or a missing object; the tool then sets the MCP error flag.</summary>
+public record ObjectContextResult(bool Found, string Text);
 
 public record ServerRegistryItem(
     string ServerAlias,

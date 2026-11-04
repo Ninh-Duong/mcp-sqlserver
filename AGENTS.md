@@ -26,7 +26,7 @@ dotnet run --project src/McpSqlServer -- scan --alias DEV --output ./ai-context 
 dotnet run --project src/McpSqlServer -- --preflight                              # dependency check + self-tests
 ```
 
-`scripts/build.ps1` (restore, build, test), `scripts/run.ps1` (tests then run), `scripts/publish-singlefile.ps1`. The hub publishes with `dotnet publish src/McpSqlServer -c Release -o publish`.
+`scripts/build.ps1` (restore, build, test), `scripts/run.ps1` (tests then run), `scripts/publish-singlefile.ps1`. The hub runs `scripts/prepare.ps1`, which publishes (`dotnet publish src/McpSqlServer -c Release -o publish`) only when `publish/` is missing or older than `src/`.
 
 Integration tests marked `[FactIfSqlServer]` skip themselves unless `MSSQL_SERVER`, `MSSQL_USERNAME`, `MSSQL_PASSWORD` are set; use a disposable server.
 

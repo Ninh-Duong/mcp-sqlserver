@@ -74,12 +74,12 @@ Built by the command-line `scan`; see [README.md](../README.md#offline-snapshot)
 ### search_context
 Instant search of the snapshot.
 - Input: `query`, `server_alias?`, `database?`, `target?` (`all|table|column|routine|procedure|view|function|trigger|dependency`), `limit?` (1-50, default 10), `include_details?`.
-- Output: `{query, total_matches, matches[{server_alias, database, type, name, details, relative_path}], message}`.
+- Output: `{query, total_matches, matches[{server_alias, database, type, name, details, relative_path}], message, success}`. No snapshot (`ai-context/catalog.db`), an empty query or an unreadable catalog sets the error flag (`success: false`); zero matches is a success.
 
 ### get_object_context
 Compact definition of one object from the snapshot.
 - Input: `database`, `name`, `server_alias?`, `type?`.
-- Output: plain text (Markdown or SQL). Names with path separators, `..` or wildcards are rejected (`Invalid ...`, error flag set).
+- Output: plain text (Markdown or SQL). Names with path separators, `..` or wildcards are rejected (`Invalid ...`), and a database or object missing from the snapshot answers `... not found ...`; both set the error flag and return `{success: false, error_message}`.
 
 ### check_schema_drift
 Compare live databases with the snapshot (new EF migrations, DDL changes).

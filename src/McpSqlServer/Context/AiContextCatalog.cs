@@ -199,14 +199,15 @@ VALUES (@alias, @db, 'dependency', @name, @details, @path);";
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "Query string cannot be empty.");
+            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "Query string cannot be empty.", Success: false);
         }
 
         var fullBaseDir = Path.GetFullPath(baseDirectory);
         var catalogPath = Path.Combine(fullBaseDir, "catalog.db");
         if (!File.Exists(catalogPath))
         {
-            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(), "No ai-context catalog found. Please run 'scan_server_context' tool first.");
+            return new SearchContextResult(query, 0, Array.Empty<SearchContextMatch>(),
+                "No offline snapshot found (ai-context/catalog.db). Ask the user to run the command-line 'scan' first.", Success: false);
         }
 
         var q = query.Trim();
@@ -265,9 +266,10 @@ LIMIT @limit;";
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return new SearchContextResult(q, 0, Array.Empty<SearchContextMatch>(), $"Error querying catalog: {ex.Message}");
+            // Type name only: SQLite messages can include local file paths.
+            return new SearchContextResult(q, 0, Array.Empty<SearchContextMatch>(), $"The offline snapshot could not be read ({ex.GetType().Name}). Re-run the command-line 'scan'.", Success: false);
         }
 
         return new SearchContextResult(
