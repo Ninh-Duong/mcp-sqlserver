@@ -2,11 +2,16 @@
 
 A **read-only SQL Server MCP** for investigating issues. It lets an AI agent look at real data to find a root cause, next to the log, source, ticket and pull-request MCPs of [mcp-hub](../mcp-hub). It runs **one validated `SELECT` at a time and nothing else**: no `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `DROP`, `EXEC`, no `SELECT INTO`, no multi-statement batches. This holds even when the SQL login itself is allowed to write.
 
+It works in two modes:
+
+- **MCP server** (`serve`): for AI assistants (through mcp-hub, Claude Desktop, Cursor, Antigravity, ...).
+- **Interactive CLI menu** (`menu`): for developers to explore databases and export the offline schema snapshot in the terminal.
+
 C# / .NET 10, MCP over stdio, [official MCP SDK](https://github.com/modelcontextprotocol/csharp-sdk), Microsoft ScriptDom for SQL validation.
 
 ## How read-only is guaranteed
 
-Six independent layers ([docs/SECURITY.md](docs/SECURITY.md)): a T-SQL **AST allowlist** (not regex), a transaction that is **always rolled back**, session guards (lock timeout, row limit, `READ UNCOMMITTED`), `ApplicationIntent=ReadOnly`, a database allow-list, and output limits with column masking. All SQL goes through one class, and tests fail the build if any other code opens a connection.
+Six independent layers ([docs/SECURITY.md](docs/SECURITY.md)): a T-SQL **AST allowlist** (not a keyword list), a transaction that is **always rolled back**, session guards (lock timeout, row limit, `READ UNCOMMITTED`), `ApplicationIntent=ReadOnly`, a database allow-list, and output limits with column masking. Passwords are redacted (`***`) in logs and errors. All SQL goes through one class, and tests fail the build if any other code opens a connection.
 
 ## Tools
 
@@ -21,26 +26,70 @@ Six independent layers ([docs/SECURITY.md](docs/SECURITY.md)): a T-SQL **AST all
 
 How an agent uses them to get from a symptom to a root cause: [docs/INVESTIGATION_PLAYBOOK.md](docs/INVESTIGATION_PLAYBOOK.md).
 
-## Use it with mcp-hub
+## Quick start (3 steps)
 
-The hub starts it as a child process and exposes `sql__*`. Step by step: [docs/HUB_INTEGRATION.md](docs/HUB_INTEGRATION.md). In short: the hub files (`config/mcps/mcp-sqlserver.example.json`, the `sql` feature in `config/hub.example.json`, `docs/mcps/mcp-sqlserver.md`) are already in `mcp-hub`; fill the `mssql` section of the private child file and enable it.
+### 1. Prerequisites
 
-## Run it stand-alone
+Install the [.NET 10 SDK](https://dotnet.microsoft.com/download) (`dotnet --version`).
 
-Requirements: .NET 10 SDK.
+### 2. Configuration
 
-```powershell
-Copy-Item dbconfig.example.json dbconfig.json      # git-ignored; fill server, username, password
-dotnet run --project src/McpSqlServer -- serve     # MCP over stdio
-dotnet run --project src/McpSqlServer -- menu      # interactive menu (default mode)
-dotnet run --project src/McpSqlServer -- --preflight
+Copy [`dbconfig.example.json`](dbconfig.example.json) to `dbconfig.json` in the project root and fill the first fields:
+
+```json
+{
+  "server_alias": "DEV",
+  "server": "sql.example.internal",
+  "port": 1433,
+  "username": "reader",
+  "password": "YourPassword123",
+  "database": "master",
+  "encrypt": true,
+  "trust_server_certificate": false
+}
 ```
 
-Or set `MSSQL_SERVER`, `MSSQL_USERNAME`, `MSSQL_PASSWORD`. All keys, priority (environment > hub section > local file > default) and examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+`dbconfig.json` is git-ignored, so credentials are never committed. Environment variables (`MSSQL_SERVER`, `MSSQL_USERNAME`, `MSSQL_PASSWORD`, ...) win over the file. All keys, the priority (environment > hub section > local file > default) and examples: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-The server starts and lists its tools even with no credentials; database tools then answer `not configured`.
+The server starts and lists its tools even with no credentials; database tools then answer `not configured`. A read-only login is recommended but not required: [docs/readonly-login.sql](docs/readonly-login.sql).
 
-A read-only login is recommended but not required: [docs/readonly-login.sql](docs/readonly-login.sql).
+### 3. Run
+
+**Mode A: interactive menu (for humans)**
+
+```powershell
+powershell -File ./scripts/run.ps1 menu          # runs the unit tests first, then starts
+dotnet run --project ./src/McpSqlServer -- menu
+```
+
+Menu options: `1` configure connection settings, `2` test connection, `3` check DB migrations and schema drift, `4` list databases, `5` list tables in a database, `6` scan the server and export the offline snapshot (`./ai-context/`), `0` exit.
+
+**Mode B: MCP server (for AI tools)**
+
+Through mcp-hub, see [docs/HUB_INTEGRATION.md](docs/HUB_INTEGRATION.md). The hub files (`config/mcps/mcp-sqlserver.example.json`, the `sql` feature in `config/hub.example.json`, `docs/mcps/mcp-sqlserver.md`) are already in `mcp-hub`: fill the `mssql` section of the private child file and enable it.
+
+Directly in another MCP client (for example `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "sqlserver": {
+      "command": "dotnet",
+      "args": ["run", "--project", "./src/McpSqlServer", "--", "serve"],
+      "env": {
+        "MSSQL_SERVER": "sql.example.internal",
+        "MSSQL_USERNAME": "reader",
+        "MSSQL_PASSWORD": "YourPassword123",
+        "MSSQL_ALLOWED_DATABASES": "Crm,Billing"
+      }
+    }
+  }
+}
+```
+
+Use `dotnet publish src/McpSqlServer -c Release -o publish` and `publish/McpSqlServer.exe serve` for a faster start.
+
+Other commands: `dotnet run --project src/McpSqlServer -- --preflight` (dependency check and self-tests).
 
 ## Offline snapshot
 
