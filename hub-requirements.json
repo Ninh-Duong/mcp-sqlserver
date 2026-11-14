@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "label": "SQL Server login",
+      "anyOf": [
+        ["mssql.server", "mssql.username", "mssql.password"]
+      ]
+    }
+  ]
+}

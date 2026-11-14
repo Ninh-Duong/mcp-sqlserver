@@ -66,7 +66,7 @@ Menu options: `1` configure connection settings, `2` test connection, `3` check 
 
 **Mode B: MCP server (for AI tools)**
 
-Through mcp-hub, see [docs/HUB_INTEGRATION.md](docs/HUB_INTEGRATION.md). The hub files (`config/mcps/mcp-sqlserver.example.json`, the `sql` feature in `config/hub.example.json`, `docs/mcps/mcp-sqlserver.md`) are already in `mcp-hub`: fill the `mssql` section of the private child file and enable it.
+Through mcp-hub, see [docs/HUB_INTEGRATION.md](docs/HUB_INTEGRATION.md). The hub files (`config/mcps/mcp-sqlserver.example.json`, the `sql` feature in `config/hub.example.json`, `docs/mcps/mcp-sqlserver.md`) are already in `mcp-hub`: fill the `mssql` section of the private child file and enable it. `hub-requirements.json` (repo root) lists the `mssql` server, username and password; mcp-hub's desktop app shows a gap as **Config incomplete**, and the server still starts.
 
 Directly in another MCP client (for example `claude_desktop_config.json`):
 
