@@ -1,6 +1,6 @@
 # Tools
 
-13 tools, all **read-only** (`readOnlyHint = true`). Behind `mcp-hub` they are exposed as `sql__<tool>`. Every result is one text block of compact JSON with `snake_case` keys and no null fields. A failure sets the MCP error flag (`isError`) and carries `error_message`. Without credentials every database tool answers with an error containing `not configured`.
+14 tools, all **read-only** (`readOnlyHint = true`). Behind `mcp-hub` they are exposed as `sql__<tool>`, except `config_status`, which only the Hub itself calls. Every result is one text block of compact JSON with `snake_case` keys and no null fields. A failure sets the MCP error flag (`isError`) and carries `error_message`. Without credentials every database tool answers with an error containing `not configured`.
 
 This file is checked against the code by `DocsConsistencyTests`: every tool needs a `### <name>` section here, and no section may describe a tool that does not exist.
 
@@ -13,6 +13,11 @@ Connectivity, server version and whether the login could write. Call it first.
 - Input: none.
 - Output: `{success, connected, elapsed_ms, server_version, write_capable, warnings[], config_source{server, credentials, limits}, error_message?}`. `config_source` values: `env|hub|local|default|unset` (never the values).
 - `write_capable: true` means the login is sysadmin/db_owner or has INSERT/UPDATE/DELETE. The MCP still cannot write; see [SECURITY.md](SECURITY.md).
+
+### config_status
+Where the SQL login comes from, for mcp-hub's config check. Opens no connection and makes no network call. The Hub calls it after it connects; it is not in the `sql` feature allowlist, so agents do not see it.
+- Input: none.
+- Output: exactly `{"groups": {"mssql_login": "<source>"}}`, source `env|hub|local|default|unset`. `mssql_login` matches the group `id` in `hub-requirements.json` (keys `mssql.server`, `mssql.username`, `mssql.password`). It is `unset` when the `server` or `credentials` group of `check_connection`'s `config_source` is unset, otherwise the `credentials` source. Never values or paths.
 
 ### list_databases
 Databases this MCP may query.

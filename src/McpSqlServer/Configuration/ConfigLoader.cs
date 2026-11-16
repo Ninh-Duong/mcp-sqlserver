@@ -109,6 +109,17 @@ public static class ConfigLoader
         return new LoadResult(options, warnings);
     }
 
+    /// <summary>
+    /// Source of the SQL login, the <c>mssql_login</c> group in hub-requirements.json (server, username, password):
+    /// <c>unset</c> when the server or the credentials group is unset, otherwise the credentials source. Never a value.
+    /// </summary>
+    public static string LoginSource(IReadOnlyDictionary<string, string> sources)
+    {
+        var server = sources.GetValueOrDefault("server", "unset");
+        var credentials = sources.GetValueOrDefault("credentials", "unset");
+        return server == "unset" || credentials == "unset" ? "unset" : credentials;
+    }
+
     private static int Rank(string layer) => layer switch { "env" => 0, "hub" => 1, "local" => 2, _ => 3 };
 
     private static Dictionary<string, string> ReadEnvironment(Func<string, string?> getEnv)

@@ -7,7 +7,7 @@
 | Hub requirement | Where it is satisfied |
 |---|---|
 | Starts over stdio, lists tools **without credentials** | `McpSqlServer.exe serve`; missing config only produces `not configured` errors from DB tools (RULES #7) |
-| Reads its section from `CENTRAL_CONFIG_PATH`, falls back to local files, reports the source | `Configuration/ConfigLoader.cs`, section `mssql`; `check_connection` returns `config_source` |
+| Reads its section from `CENTRAL_CONFIG_PATH`, falls back to local files, reports the source | `Configuration/ConfigLoader.cs`, section `mssql`; `check_connection` returns `config_source`; `config_status` returns `{"groups": {"mssql_login": "<source>"}}` without connecting, for the Hub's config check (group `id` in `hub-requirements.json`) |
 | Read-only tools carry `readOnlyHint = true` | every tool in `Mcp/SqlTools.cs`; enforced by `ArchitectureRulesTests` |
 | Failures use the MCP error flag, never a message prefix | `ToolResults`; offline tools return `SearchContextResult.Success` / `ObjectContextResult.Found` |
 | stdout only for the protocol, diagnostics on stderr | `Logger`; checked by `ArchitectureRulesTests` |
@@ -36,7 +36,7 @@
 
    `cwd` must be the repository root (a relative `CENTRAL_CONFIG_PATH` and `dbconfig.json` resolve from there). `command` is the published executable; `connectTimeoutSeconds` is generous because the first start can follow a build. NuGet restore fails without a `ProgramFiles` variable, so `inheritEnv` passes `ProgramFiles` and `ProgramFiles(x86)`.
 
-2. **`config/hub.example.json`** registers the server (disabled) with a `prepare` step (`scripts/prepare.ps1`, needs the .NET 10 SDK; it publishes only when `publish/McpSqlServer.exe` is missing or older than `src/`) and the feature `sql` with an allowlist of the 13 tools, `exposeAs: sql__<tool>`. Data tools (`lookup_rows`, `get_related_rows`, `run_select`, `explain_select`) have no `cacheSeconds` on purpose.
+2. **`config/hub.example.json`** registers the server (disabled) with a `prepare` step (`scripts/prepare.ps1`, needs the .NET 10 SDK; it publishes only when `publish/McpSqlServer.exe` is missing or older than `src/`) and the feature `sql` with an allowlist of the 13 agent tools (not `config_status`, which the Hub calls itself), `exposeAs: sql__<tool>`. Data tools (`lookup_rows`, `get_related_rows`, `run_select`, `explain_select`) have no `cacheSeconds` on purpose.
 
 3. **`docs/mcps/mcp-sqlserver.md`** is the contract the hub serves to AI clients.
 

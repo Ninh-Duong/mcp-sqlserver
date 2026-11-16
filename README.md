@@ -15,11 +15,11 @@ Six independent layers ([docs/SECURITY.md](docs/SECURITY.md)): a T-SQL **AST all
 
 ## Tools
 
-13 tools, all `readOnlyHint = true` (behind the hub they are `sql__<tool>`). Details: [docs/TOOLS.md](docs/TOOLS.md).
+14 tools, all `readOnlyHint = true` (behind the hub they are `sql__<tool>`; `config_status` is called by the Hub itself and not exposed). Details: [docs/TOOLS.md](docs/TOOLS.md).
 
 | Group | Tools |
 |---|---|
-| Server | `check_connection`, `list_databases` |
+| Server | `check_connection`, `list_databases`, `config_status` (Hub config check, no connection) |
 | Schema (live) | `list_tables`, `describe_table`, `find_columns`, `get_object_definition` |
 | Data | `lookup_rows` (no SQL needed), `get_related_rows` (follow foreign keys), `run_select`, `explain_select` |
 | Offline snapshot | `search_context`, `get_object_context`, `check_schema_drift` |

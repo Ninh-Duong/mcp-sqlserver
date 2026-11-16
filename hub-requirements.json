@@ -2,6 +2,7 @@
   "version": 1,
   "groups": [
     {
+      "id": "mssql_login",
       "label": "SQL Server login",
       "anyOf": [
         ["mssql.server", "mssql.username", "mssql.password"]

@@ -30,6 +30,11 @@ public sealed class SqlTools(
         return ToolResults.From(result, result.Success);
     }
 
+    [McpServerTool(Name = "config_status", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false)]
+    [Description("Report where the SQL login settings come from (groups.mssql_login: env|hub|local|default|unset) without connecting. Names only, never values. Used by mcp-hub.")]
+    public CallToolResult ConfigStatus() =>
+        ToolResults.From(new { groups = new Dictionary<string, string> { ["mssql_login"] = Configuration.ConfigLoader.LoginSource(options.ConfigSources) } }, true);
+
     [McpServerTool(Name = "list_databases", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = true)]
     [Description("List the databases this MCP is allowed to query (system databases are excluded unless allowed_databases says otherwise), with state and access.")]
     public async Task<CallToolResult> ListDatabases(CancellationToken cancellationToken)

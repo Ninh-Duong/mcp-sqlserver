@@ -23,6 +23,11 @@ public class DocsConsistencyTests
 
     private static string Read(params string[] parts) => File.ReadAllText(Path.Combine([Root, .. parts]));
 
+    /// <summary>Tools the Hub calls itself (mcp-hub agent-plans/child-local-config-sources.md); never in the agent allowlist.</summary>
+    private static readonly string[] HubInternalTools = ["config_status"];
+
+    private static List<string> HubExposedToolNames() => ToolNames().Except(HubInternalTools).ToList();
+
     private static List<string> ToolNames() =>
         typeof(Mcp.SqlTools).GetMethods()
             .Select(m => (McpServerToolAttribute?)Attribute.GetCustomAttribute(m, typeof(McpServerToolAttribute)))
@@ -180,7 +185,7 @@ public class DocsConsistencyTests
         Assert.EndsWith("/mcp-sqlserver.git", server.GetProperty("repository").GetString());
 
         var tools = doc.RootElement.GetProperty("features").GetProperty("sql").GetProperty("tools").EnumerateArray().ToList();
-        Assert.Equal(ToolNames(), tools.Select(t => t.GetProperty("name").GetString()!).OrderBy(n => n, StringComparer.Ordinal).ToList());
+        Assert.Equal(HubExposedToolNames(), tools.Select(t => t.GetProperty("name").GetString()!).OrderBy(n => n, StringComparer.Ordinal).ToList());
         Assert.All(tools, t =>
         {
             Assert.Equal("mcp-sqlserver", t.GetProperty("server").GetString());
@@ -197,7 +202,7 @@ public class DocsConsistencyTests
     {
         var contract = File.ReadAllText(Path.Combine(HubRoot, "docs", "mcps", "mcp-sqlserver.md"));
 
-        foreach (var name in ToolNames())
+        foreach (var name in HubExposedToolNames())
             Assert.Contains($"sql__{name}", contract);
     }
 

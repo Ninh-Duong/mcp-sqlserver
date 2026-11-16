@@ -14,7 +14,7 @@ public sealed class McpStdioEndToEndTests : IAsyncLifetime
     [
         "check_connection", "list_databases", "list_tables", "describe_table", "find_columns",
         "lookup_rows", "get_related_rows", "run_select", "explain_select", "get_object_definition",
-        "search_context", "get_object_context", "check_schema_drift",
+        "search_context", "get_object_context", "check_schema_drift", "config_status",
     ];
 
     private Process? _process;
@@ -123,6 +123,17 @@ public sealed class McpStdioEndToEndTests : IAsyncLifetime
             foreach (var property in tool.GetProperty("inputSchema").GetProperty("properties").EnumerateObject())
                 Assert.Matches("^[a-z][a-z0-9_]*$", property.Name);
         }
+    }
+
+    [Fact]
+    public async Task ConfigStatus_WithoutCredentials_ReportsUnset_WithoutAnError()
+    {
+        await StartAndInitializeAsync();
+
+        var (isError, text) = await CallToolAsync("config_status", new { });
+
+        Assert.False(isError);
+        Assert.Equal("""{"groups":{"mssql_login":"unset"}}""", text);
     }
 
     [Fact]

@@ -20,6 +20,7 @@ public class HubRequirementsTests
         foreach (var group in root.GetProperty("groups").EnumerateArray())
         {
             Assert.False(string.IsNullOrWhiteSpace(group.GetProperty("label").GetString()));
+            Assert.Equal("mssql_login", group.GetProperty("id").GetString()); // matches the config_status group
             foreach (var alternative in group.GetProperty("anyOf").EnumerateArray())
             {
                 foreach (var key in alternative.EnumerateArray())
